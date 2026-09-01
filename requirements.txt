@@ -1,0 +1,24 @@
+# Pure-python dependencies only. **No CUDA-only package appears here.**
+# The attention path is replaced at launch time by the shim in
+# runners/hunyuan3d/shape.py. Upstream code is never patched.
+#
+# Versions are the ones this was verified with on 2026-09-01.
+diffusers==0.40.0
+transformers==5.16.1
+accelerate==1.14.0
+safetensors==0.8.0
+huggingface_hub==1.29.0
+omegaconf==2.3.1
+einops==0.8.2
+scikit-image==0.26.0
+scipy==1.18.1
+trimesh==5.0.0
+pygltflib==1.16.5
+pymeshlab==2025.7.post1
+tqdm==4.70.0
+python-dotenv==1.2.3
+
+# Background removal. **Not optional**: ImageProcessorV2.recenter() sets the
+# whole mask to 255 for a 3-channel image, so the subject is never cropped.
+rembg==2.0.81
+onnxruntime==1.29.0
