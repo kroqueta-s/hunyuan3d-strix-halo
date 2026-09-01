@@ -1,18 +1,17 @@
 # SPDX-License-Identifier: MIT
-"""Hunyuan3D 2.1 の shape 段（このランナーの中核）。
+"""The Hunyuan3D 2.1 shape stage, the core of this runner.
 
-1 枚の前景画像 → 3D ネイティブ潜在拡散 → SDF → marching cubes → watertight メッシュ。
-テクスチャ段は使わない（用途が 3D プリント主体で、かつ CUDA 依存を避けられる）。
+One foreground image goes to 3D-native latent diffusion, to an SDF, through
+marching cubes, and out as a watertight mesh. The texture stage is not used:
+the intended output is 3D printing, and skipping it avoids a CUDA dependency.
 
-**このモジュールはこのランナー専用の venv でしか動かない**
-（torch+ROCm と Hunyuan3D のリポジトリが要る）。ComfyUI の venv からは import できない。
+**This module runs only inside this runner's own virtual environment**, which
+needs torch with ROCm and the Hunyuan3D repository.
 
-gfx1151/Windows/ROCm での必須の細工は `_install_sdpa_shim` と `enable_flashvdm` の 2 つ。
-どちらも外すと「動かない」ではなく「静かに壊れる／終わらない」ので、
-根拠は各所の docstring に残してある。**実測は SwitchDeck の docs/25 §1.3。**
-
-SwitchDeck -> meshforge -> hearth のランナーへと移設した（2026-09-01）。
-変更は設定キー名だけで、**shim には触っていない**。
+Two things are required on gfx1151 / Windows / ROCm: `_install_sdpa_shim` and
+`enable_flashvdm`. Dropping either does not produce a failure but **silent
+corruption or a run that never ends**, so the reasoning is recorded in the
+docstrings where each one lives.
 """
 
 from __future__ import annotations
@@ -39,27 +38,29 @@ BACKEND = "hunyuan3d21"
 
 _PIPELINE: Any = None
 _LOAD_SEC: float = 0.0
-# 速いアテンション（AOTriton）が効いているか。**metrics に載せて記録に残す。**
+# Whether fast attention (AOTriton) is in effect. **Recorded in metrics.**
 _FAST_ATTENTION: bool = False
 
 
 class _DeviceWatch:
-    """デバイスの実使用量を追い、**一定間隔で生存を知らせる**監視スレッド。
+    """Watcher thread that tracks device memory and **reports liveness at a fixed interval**.
 
-    以前は使用量のピークを取るだけだった。それだけだと、長い段の途中で
-    「進んでいるのか、止まっているのか」が外から一切分からない。実際に
-    2026-09-01、生成が黙って 12 分以上走るのを何度も待ってしまった。
+    It used to only take a peak reading. That alone leaves no way to tell from
+    outside whether a long stage is progressing or stuck; on 2026-09-01 runs
+    were repeatedly allowed to continue silently for more than 12 minutes.
 
-    見ているのは 3 つ：
+    Three things are watched:
 
-    1. **生存**（`heartbeat`）。既定 10 秒ごとに経過秒と VRAM を流す。
-       呼び出し側はこれが止まったことで「進んでいない」を判定できる
-    2. **専用 VRAM の超過**（`vram_over`）。**専用 VRAM は 32GB しかない。**
-       `torch.cuda.mem_get_info` の total（43.87GB）は共有メモリ込みの嘘なので、
-       溢れても例外にならず、**黙って数倍遅くなる**。ここを跨いだ瞬間に知らせる
-    3. ピーク（従来どおり `metrics` へ載せる）
+    1. **Liveness** (`heartbeat`): elapsed time and VRAM every 10 seconds by
+       default. The caller can treat a gap as "not progressing".
+    2. **Dedicated VRAM overflow** (`vram_over`). **There are only 32 GB of
+       dedicated VRAM.** The total reported by `torch.cuda.mem_get_info`
+       (43.87 GB) is a lie that counts shared memory, so spilling raises nothing
+       and **silently becomes several times slower**. Crossing the line is
+       reported the moment it happens.
+    3. The peak (still reported in `metrics`).
 
-    **このスレッドから `progress` を呼ぶので、呼び出し側の emit は鍵で守ること。**
+    **This thread calls `progress`, so the caller's emit must be lock-protected.**
     """
 
     def __init__(
@@ -97,15 +98,15 @@ class _DeviceWatch:
                 self.exceeded = True
                 self._say(
                     "vram_over",
-                    f"**専用 VRAM を超えた**（{used:.2f}GB > {self.limit_gb:.2f}GB）。"
-                    "共有メモリへ溢れているので、このまま待っても遅いだけ",
+                    f"**dedicated VRAM exceeded** ({used:.2f}GB > {self.limit_gb:.2f}GB). "
+                    "It is spilling into shared memory, so waiting only means slower",
                 )
             if now - last_beat >= self.heartbeat_sec:
                 last_beat = now
                 self._say(
                     "heartbeat",
-                    f"{self.stage or '実行中'} 経過 {now - started:.0f}s / "
-                    f"VRAM {used:.2f}GB（ピーク {self.peak_used_gb:.2f}GB）",
+                    f"{self.stage or 'running'} {now - started:.0f}s elapsed / "
+                    f"VRAM {used:.2f}GB (peak {self.peak_used_gb:.2f}GB)",
                 )
             self._stop.wait(self.interval)
 
@@ -118,16 +119,17 @@ class _DeviceWatch:
         self._t.join(timeout=5)
 
 
-# **差し替える前の本物**を捕まえておく。シムの中から呼ぶと自分自身を呼ぶことになる。
+# **Capture the real function before replacing it**, or a call from inside the shim
+# would call the shim itself.
 _TORCH_SDPA = F.scaled_dot_product_attention
 
 
 def fast_attention_available() -> bool:
-    """flash / mem-efficient が**実際に走るか**を小さなテンソルで試す。
+    """Test on a small tensor whether flash or mem-efficient **actually runs**.
 
-    gfx1151 では `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` を
-    **torch を import する前に**置いたときだけ AOTriton の実装が有効になる
-    （後から `os.environ` へ入れても効かないことを実測した）。
+    On gfx1151 the AOTriton implementations become available only when
+    `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` is set **before torch is
+    imported** (measured: setting `os.environ` afterwards has no effect).
     """
     if not torch.cuda.is_available():
         return False
@@ -141,46 +143,53 @@ def fast_attention_available() -> bool:
             with sdpa_kernel(backend):
                 _TORCH_SDPA(probe, probe, probe)
             return True
-        except Exception:  # noqa: BLE001 - 使えないことを知りたいだけ
+        except Exception:  # noqa: BLE001 - only the availability matters
             continue
     return False
 
 
 def _install_sdpa_shim(head_chunk: int, fp32: bool | None = None) -> bool:
-    """gfx1151/Windows/ROCm 向けに SDPA を差し替える。
+    """Replace SDPA for gfx1151 / Windows / ROCm.
 
-    元々は 2 つの問題を同時に解くための細工だった:
+    It was originally a fix for two problems at once:
 
-    1. **バックエンド不在** — hunyuandit.py は 3 箇所で
+    1. **No backend available.** hunyuandit.py calls
        ``sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True)``
-       と呼ぶが、**この指定は唯一動くバックエンド（math）を塞いでいた**
-    2. **fp16 math の数値破綻** — math backend は online softmax を持たず
-       ``q @ k^T``（seq=4096）を入力 dtype のまま実体化する。fp16 の上限 65504 を
-       超えて SDF 場がノイズ化する（鏡像入力で決定論的に再現した）
+       in three places, and **that request blocked the only backend that worked
+       (math)**.
+    2. **fp16 math breaking down numerically.** The math backend has no online
+       softmax and materialises ``q @ k^T`` (seq=4096) in the input dtype. It
+       exceeds the fp16 limit of 65504 and turns the SDF field into noise
+       (reproduced deterministically with a mirrored input).
 
-    **2026-09-01 に前提が変わった。** `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` を
-    torch より先に置くと **flash / mem-efficient が使えるようになる**（実測：seq=4096 で
-    0.135s → 0.012s）。flash は online softmax なので `q @ k^T` を実体化せず、
-    **2 の破綻の原因そのものが無くなる。**
+    **The premise changed on 2026-09-01.** Setting
+    `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` before torch **makes flash and
+    mem-efficient available** (measured: seq=4096 from 0.135s to 0.012s). Flash
+    uses an online softmax and never materialises `q @ k^T`, so **the cause of
+    problem 2 disappears entirely.**
 
-    そこで、速い経路が使えるなら **`sdp_kernel` の封じだけを解いて本物に任せる**。
-    使えないときだけ従来どおり fp32＋ヘッド分割へ落ちる。**判断は実測で行い、憶測しない。**
+    So when the fast path is available, **only the `sdp_kernel` block is lifted
+    and the real implementation takes over**; the fp32 head-chunked path is used
+    only when it is not. **The decision is made by measurement, never assumed.**
 
     Args:
-        head_chunk: fp32 経路で一度に計算するヘッド数。速い経路では使わない。
-        fp32: None なら**実測で決める**。True/False で強制もできる（破綻の再現用）。
+        head_chunk: Heads computed at once on the fp32 path. Unused on the fast
+            path.
+        fp32: None **decides by measurement**. True or False forces it, which is
+            useful for reproducing the breakdown.
 
     Returns:
-        速い経路が有効か。**`metrics` へ載せて記録に残す。**
+        Whether the fast path is in effect. **Recorded in `metrics`.**
     """
-    # ベンダーが flash と mem_efficient だけを許す指定をしても落ちないようにする。
-    # 速い経路が使えるなら、この封じを解くだけで本物の flash が選ばれる。
+    # Keep upstream's flash-and-mem_efficient-only request from failing. When
+    # the fast path is available, lifting the block is all that is needed for the
+    # real flash implementation to be chosen.
     torch.backends.cuda.sdp_kernel = lambda *a, **kw: contextlib.nullcontext()
 
     use_fp32 = (not fast_attention_available()) if fp32 is None else fp32
     if not use_fp32:
         F.scaled_dot_product_attention = _TORCH_SDPA
-        print("[shape] fast attention=yes（AOTriton の flash に任せる）", file=sys.stderr)
+        print("[shape] fast attention=yes (delegating to AOTriton flash)", file=sys.stderr)
         return True
 
     def sdpa(
@@ -194,7 +203,7 @@ def _install_sdpa_shim(head_chunk: int, fp32: bool | None = None) -> bool:
         enable_gqa: bool = False,
     ) -> torch.Tensor:
         if attn_mask is not None or is_causal or dropout_p:
-            # 本モデルの推論経路では使われない。来たら気付けるように落とす。
+            # Never used on this model's inference path; raise so it is noticed.
             raise NotImplementedError("patched SDPA supports plain attention only")
         out_dtype = query.dtype
         d = query.shape[-1]
@@ -212,24 +221,27 @@ def _install_sdpa_shim(head_chunk: int, fp32: bool | None = None) -> bool:
         return torch.cat(outs, dim=1)
 
     F.scaled_dot_product_attention = sdpa
-    print("[shape] fast attention=no（fp32＋ヘッド分割へ落ちる）", file=sys.stderr)
+    print("[shape] fast attention=no (falling back to fp32 over chunked heads)", file=sys.stderr)
     return False
 
 
 @dataclass(frozen=True)
 class ShapeResult:
-    """shape 生成の結果と実測値。
+    """The generated shape and its measurements.
 
-    mesh: 生成されたメッシュ（正規化スケール。実寸化は printability.scale_to_mm）。
-    backend: 使用したバックエンド識別子。
-    load_sec: パイプライン読み込み秒。2 回目以降はキャッシュ済みなので同じ値が返る。
-    gen_sec: 生成秒。**このハードでは不安定な指標**なので合否判定に使わない。
-    vram_peak_gb: デバイス実使用量のピーク（GB）。
-    fast_attention: 速いアテンション（AOTriton の flash）が効いているか。
-    steps: 推論ステップ数。
-    octree_resolution: marching cubes の octree 解像度。
-    guidance_scale: guidance scale。
-    seed: 乱数シード。
+    mesh: The generated mesh, at normalized scale. Scaling to real-world size is
+        downstream work.
+    backend: Identifier of the backend used.
+    load_sec: Seconds spent loading the pipeline. Later calls return the same
+        value, since the pipeline is cached.
+    gen_sec: Seconds spent generating. **An unstable figure on this hardware**,
+        so never use it as a pass/fail signal.
+    vram_peak_gb: Peak device memory in use, in GB.
+    fast_attention: Whether fast attention (AOTriton flash) is in effect.
+    steps: Inference steps.
+    octree_resolution: Octree resolution for marching cubes.
+    guidance_scale: Guidance scale.
+    seed: Random seed.
     """
 
     mesh: trimesh.Trimesh
@@ -245,32 +257,34 @@ class ShapeResult:
 
 
 def load_pipeline() -> Any:
-    """Hunyuan3D 2.1 の shape パイプラインをプロセス内で 1 度だけ読み込んで返す。
+    """Load the Hunyuan3D 2.1 shape pipeline once per process and return it.
 
-    手順の順序に意味がある。特に `_install_sdpa_shim` は **hy3dshape を import する前**に
-    呼ぶこと（import 時に `scaled_dot_product_attention` を束縛されると差し替えが効かない）。
+    The order of the steps matters. In particular, `_install_sdpa_shim` must be
+    called **before hy3dshape is imported**: once the import binds
+    `scaled_dot_product_attention`, the replacement no longer takes effect.
 
     Returns:
-        Hunyuan3DDiTFlowMatchingPipeline のインスタンス。
+        A Hunyuan3DDiTFlowMatchingPipeline instance.
 
     Raises:
-        FileNotFoundError: リポジトリまたは重みのディレクトリが見つからないとき。
+        FileNotFoundError: If the repository or the weights directory is missing.
     """
     global _PIPELINE, _LOAD_SEC
     if _PIPELINE is not None:
         return _PIPELINE
     if not config.SHAPE_REPO.is_dir():
         raise FileNotFoundError(
-            f"shape リポジトリが無い: {config.SHAPE_REPO}（HUNYUAN3D_SHAPE_REPO を確認する）"
+            f"shape repository not found: {config.SHAPE_REPO} (check HUNYUAN3D_SHAPE_REPO)"
         )
     if not config.SHAPE_MODELS_DIR.is_dir():
         raise FileNotFoundError(
-            f"重みのディレクトリが無い: {config.SHAPE_MODELS_DIR}"
-            "（HUNYUAN3D_MODELS_DIR を確認する）"
+            f"weights directory not found: {config.SHAPE_MODELS_DIR} "
+            "(check HUNYUAN3D_MODELS_DIR)"
         )
 
-    # Hunyuan 側はこの環境変数で重みを探す（utils.py: os.environ.get('HY3DGEN_MODELS', ...)）。
-    # .env が正典なので既存値があっても上書きする。
+    # Hunyuan finds its weights through this environment variable
+    # (utils.py: os.environ.get('HY3DGEN_MODELS', ...)). `.env` is authoritative
+    # here, so any existing value is overwritten.
     os.environ["HY3DGEN_MODELS"] = str(config.SHAPE_MODELS_DIR)
     repo = str(config.SHAPE_REPO)
     if repo not in sys.path:
@@ -286,9 +300,10 @@ def load_pipeline() -> Any:
     pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
         config.SHAPE_MODEL_ID, device="cuda", dtype=torch.float16
     )
-    # flashvdm は必須。既定の VanillaVolumeDecoder は 385^3 点を全数クエリして
-    # 30 分超でも終わらない。FlashVDM は純 PyTorch で独自 CUDA カーネルを使わない。
-    # mc_algo="mc" は skimage（CPU）。"dmc" は diso（CUDA）が要るので使えない。
+    # flashvdm is required: the default VanillaVolumeDecoder queries every point
+    # of a 385^3 grid and does not finish in 30 minutes. FlashVDM is pure PyTorch
+    # and uses no custom CUDA kernels. mc_algo="mc" is skimage on the CPU; "dmc"
+    # needs diso (CUDA) and is unavailable here.
     pipe.enable_flashvdm(enabled=True, topk_mode="mean", mc_algo="mc")
     _LOAD_SEC = time.perf_counter() - t0
     _PIPELINE = pipe
@@ -304,24 +319,27 @@ def generate_mesh(
     seed: int = 0,
     progress: Callable[[str, str], None] | None = None,
 ) -> ShapeResult:
-    """前景画像 1 枚から shape メッシュを生成する。
+    """Generate a shape mesh from one foreground image.
 
-    - **入力はアルファ付き RGBA を渡すこと。** RGB のままだと Hunyuan の
-      `ImageProcessorV2.recenter()` がマスクを全面 255 にして切り出しが効かない。
-    - 生成時間はこのハードでは不安定（同一設定で 235〜921 秒）。合否判定に使わない。
+    - **Pass RGBA with an alpha channel.** With plain RGB, Hunyuan's
+      `ImageProcessorV2.recenter()` sets the whole mask to 255 and the cut-out
+      never happens.
+    - Generation time is unstable on this hardware (235 to 921 seconds for
+      identical settings). Never use it as a pass/fail signal.
 
     Args:
-        image: 背景除去済みの入力画像（RGBA）。
-        steps: 推論ステップ数。None なら .env の既定。
-        octree_resolution: marching cubes の octree 解像度。None なら .env の既定。
-        guidance_scale: guidance scale。None なら .env の既定。
-        seed: 乱数シード。
+        image: The input image with its background removed (RGBA).
+        steps: Inference steps, or None for the `.env` default.
+        octree_resolution: Octree resolution for marching cubes, or None for the
+            `.env` default.
+        guidance_scale: Guidance scale, or None for the `.env` default.
+        seed: Random seed.
 
     Returns:
-        生成メッシュと実測値をまとめた ShapeResult。
+        A ShapeResult holding the mesh and the measurements.
 
     Raises:
-        TypeError: パイプラインが Trimesh 以外を返したとき。
+        TypeError: If the pipeline returns something other than a Trimesh.
     """
     steps = config.SHAPE_STEPS if steps is None else steps
     octree_resolution = config.MC_RESOLUTION if octree_resolution is None else octree_resolution
@@ -333,7 +351,7 @@ def generate_mesh(
     torch.cuda.reset_peak_memory_stats()
     sampler = _DeviceWatch(
         progress=progress,
-        stage="生成",
+        stage="generation",
         heartbeat_sec=config.HEARTBEAT_SEC,
         limit_gb=config.VRAM_LIMIT_GB,
     )
@@ -352,7 +370,7 @@ def generate_mesh(
 
     mesh = meshes[0]
     if not isinstance(mesh, trimesh.Trimesh):
-        raise TypeError(f"shape パイプラインが Trimesh 以外を返した: {type(mesh)}")
+        raise TypeError(f"the shape pipeline returned a non-Trimesh: {type(mesh)}")
 
     return ShapeResult(
         mesh=mesh,
@@ -369,17 +387,18 @@ def generate_mesh(
 
 
 def unload_pipeline() -> bool:
-    """読み込み済みのパイプラインを解放して VRAM を返す。
+    """Release the loaded pipeline and give the VRAM back.
 
-    **VRAM 排他の要。** ランナーは常駐してモデルを温存するが（コールドロードは実測 77.6 秒）、
-    別のモデルへ切り替えるときや `mode_dev` に GPU を譲るときは明示的に解放する。
+    **This is what makes exclusive GPU use possible.** The runner stays resident
+    to keep the model warm (a cold load measured 77.6 seconds), but releases
+    explicitly when switching models or handing the GPU to another process.
 
-    `torch` の caching allocator は `del` しただけでは OS へ返さないので、
-    **`empty_cache()` まで呼ぶ**。参照が他から残っていると解放されないため、
-    ここでモジュール変数を確実に落とす。
+    `torch`'s caching allocator does not return memory to the OS on `del` alone,
+    so **`empty_cache()` is called too**. Any surviving reference would prevent
+    the release, which is why the module-level variables are cleared here.
 
     Returns:
-        解放したら True。もともと読み込んでいなければ False。
+        True if something was released, False if nothing was loaded.
     """
     global _PIPELINE, _LOAD_SEC
     if _PIPELINE is None:
@@ -392,28 +411,29 @@ def unload_pipeline() -> bool:
 
 
 def is_loaded() -> bool:
-    """パイプラインを読み込み済みかを返す。"""
+    """Return whether the pipeline is loaded."""
     return _PIPELINE is not None
 
 
 def load_seconds() -> float:
-    """直近のコールドロードに要した秒数を返す（未読み込みなら 0.0）。"""
+    """Return the seconds the last cold load took, or 0.0 when nothing is loaded."""
     return _LOAD_SEC
 
 
 def apply_vram_limit() -> float:
-    """**専用 VRAM を超えたら黙って遅くなるのではなく、その場で落ちる**ようにする。
+    """Make exceeding dedicated VRAM **fail immediately instead of silently slowing down**.
 
-    `torch.cuda.mem_get_info` の総容量は共有メモリ込み（gfx1151 で 43.87GB）で、
-    専用 VRAM の 32GB を超えても例外にならない。超えた分はホスト側のメモリへ落ちるので、
-    **例外も警告も出ないまま数倍遅くなる**（2026-09-01、疎畳み込みで実測。最終的には
-    42.02GB まで確保して `torch.OutOfMemoryError` に至った）。
+    The total from `torch.cuda.mem_get_info` includes shared memory (43.87 GB on
+    gfx1151), so passing the 32 GB of dedicated VRAM raises nothing. The excess
+    lands in host memory and **becomes several times slower with no exception and
+    no warning** (measured 2026-09-01 in sparse convolution, which eventually
+    reached 42.02 GB and a `torch.OutOfMemoryError`).
 
-    そこで割り当ての上限を総容量に対する割合で torch へ伝える。上限を超える確保は
-    `torch.OutOfMemoryError` になるので、**待たされずに気付ける。**
+    Passing an allocation cap to torch as a fraction of the total makes any
+    allocation beyond it a `torch.OutOfMemoryError`, so **it surfaces at once**.
 
     Returns:
-        実際に設定した上限（GB）。設定できなければ 0.0。
+        The cap actually applied, in GB, or 0.0 if none could be applied.
     """
     limit = float(config.VRAM_LIMIT_GB)
     if limit <= 0 or not torch.cuda.is_available():
@@ -426,10 +446,10 @@ def apply_vram_limit() -> float:
 
 
 def device_memory_gb() -> tuple[float, float]:
-    """(使用中 GB, 総容量 GB) を返す。
+    """Return (used GB, total GB).
 
-    **総容量は共有メモリ込みの値**（gfx1151 では 43.87GB と出るが専用VRAM は 32GB）。
-    表示に使うときはその旨を添えること。
+    **The total includes shared memory**: gfx1151 reports 43.87 GB while the
+    dedicated VRAM is 32 GB. Say so wherever the figure is displayed.
     """
     free, total = torch.cuda.mem_get_info()
     return ((total - free) / 1024**3, total / 1024**3)

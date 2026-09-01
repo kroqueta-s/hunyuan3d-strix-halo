@@ -1,2 +1,2 @@
 # SPDX-License-Identifier: MIT
-"""Hunyuan3D 2.1 のランナー。**このプロセスだけが torch を持つ。**"""
+"""The Hunyuan3D 2.1 runner. **This process is the only one that holds torch.**"""

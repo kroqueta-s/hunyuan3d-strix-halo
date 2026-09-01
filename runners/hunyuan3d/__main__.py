@@ -1,15 +1,14 @@
 # SPDX-License-Identifier: MIT
-"""Hunyuan3D 2.1 のランナー（`docs/00_runner_contract.md` の実装）。
+"""The Hunyuan3D 2.1 runner (an implementation of the runner contract).
 
-**このプロセスだけが torch を持つ。** hearth 本体もアドオンも torch を import しない。
+**This process is the only one that holds torch.** Neither hearth itself nor the
+Blender add-on imports it.
 
-**将来 `hunyuan3d-strix-halo` として独立リポジトリへ出す。**
-そのため hearth 側のモジュールを一切 import していない（依存は自分の中で閉じている）。
-出すときは `.env` の `HEARTH_RUNNER_HUNYUAN3D_CWD` を clone 先へ向けるだけでよい。
+The runner imports nothing from hearth, so this repository is self-contained.
 
-起動（通常は hearth が子プロセスとして起こす）::
+Start it (hearth normally spawns it as a child process)::
 
-    & $env:MESHFORGE_WORKER_PYTHON -m runners.hunyuan3d
+    .venv\\Scripts\\python.exe -m runners.hunyuan3d
 """
 
 from __future__ import annotations
@@ -24,10 +23,11 @@ from typing import Any, TextIO
 
 from . import config, gfxlight
 
-# **torch より先に置かないと効かない**（後から os.environ へ入れても無視される）。
-# 立てると gfx1151 で flash / mem-efficient が使えるようになり、
-# fp32＋ヘッド分割という最も遅い経路を通らずに済む（実測：seq=4096 で 0.135s → 0.012s）。
-# config は dotenv しか読まないので、ここで import しても torch は入ってこない。
+# **Has no effect unless it precedes torch** (setting os.environ later is
+# ignored). It makes the flash and memory-efficient kernels available on
+# gfx1151, so the slowest path (fp32 over chunked heads) is never needed
+# (measured: seq=4096 from 0.135s to 0.012s). Importing config here does not
+# pull in torch, because config only reads dotenv.
 if config.FAST_ATTENTION:
     os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
@@ -35,53 +35,55 @@ NAME = "hunyuan3d"
 VERSION = "2.1"
 
 
-# --- プロトコル（契約 §1。hearth の rpc.py と同じ形式だが依存はしない） -------
+# --- Protocol (same format as hearth's rpc.py, but with no dependency on it) ---
 def install_stdout_guard() -> TextIO:
-    """本物の stdout を複製して隠し、**fd 1 ごと stderr へ向ける**。
+    """Duplicate and hide the real stdout, **redirecting fd 1 itself to stderr**.
 
-    **最初に呼ぶこと。** ベンダーコードは平気で print する（契約 §1 の規則 2）。
-    `sys.stdout` を差し替えるだけでは足りない。**C 拡張は fd 1 へ直接書く**ので、
-    Python 側の差し替えを素通りしてプロトコルの流れに混ざる。
-    実測（2026-09-01）：`pymeshfix` が `Loading ..0%` を数百回 fd 1 へ吐いた。
+    **Call this first.** Upstream code prints freely, and replacing `sys.stdout`
+    is not enough: **C extensions write straight to fd 1**, bypassing the Python
+    side and corrupting the protocol stream. Measured 2026-09-01: `pymeshfix`
+    emitted `Loading ..0%` hundreds of times directly to fd 1.
 
-    そこで fd 1 を複製してプロトコル専用に取っておき、**fd 1 自体を fd 2 へ向け直す**。
-    これで Python からもネイティブからも、プロトコル以外は必ず stderr へ落ちる。
+    So fd 1 is duplicated and reserved for the protocol, and **fd 1 itself is
+    pointed at fd 2**. Everything that is not protocol, from Python or from
+    native code, then lands on stderr.
 
     Returns:
-        プロトコル専用の書き込み先。
+        The protocol-only writer.
     """
     fd = os.dup(1)
-    os.dup2(2, 1)  # **fd 1 を stderr へ。C 拡張の出力もこちらへ落ちる。**
+    os.dup2(2, 1)  # **fd 1 to stderr; output from C extensions lands there too.**
     protocol = os.fdopen(fd, "w", encoding="utf-8", newline="\n", buffering=1)
     sys.stdout = sys.stderr
     return protocol
 
 
-# **別スレッド（生存確認）からも書くので鍵が要る。**
-# 契約 §1 は「1 メッセージ＝1 行の JSON」。混ざると相手の解析が壊れる。
+# **A lock is required because the heartbeat thread writes too.**
+# The contract is one JSON object per line; interleaving breaks the reader.
 _EMIT_LOCK = threading.Lock()
 
 
 def emit(out: TextIO, payload: dict[str, Any]) -> None:
-    """1 行 1 メッセージで書き出し、必ず flush する。**スレッド安全。**"""
+    """Write one message per line and always flush. **Thread-safe.**"""
     line = json.dumps(payload, ensure_ascii=False) + "\n"
     with _EMIT_LOCK:
         out.write(line)
         out.flush()
 
 
-# --- メソッド ---------------------------------------------------------------
+# --- Methods -----------------------------------------------------------------
 def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
-    """能力を返す。**重みを読み込まずに即答する**（契約 §3）。"""
+    """Report capabilities. **Answers immediately, without loading the weights.**"""
     return {
         "name": NAME,
         "version": VERSION,
         "capabilities": {
             "image_to_mesh": True,
-            # テキストからの直接生成は持たない（画像は hearth が ComfyUI で作る）。
+            # There is no direct text-to-3D path; the image comes from elsewhere.
             "text_to_mesh": False,
             "multi_image_to_mesh": False,
-            # **テクスチャ段は未検証。** CUDA 依存の可能性があり gfx1151 で動く保証が無い。
+            # **The texture stage is unverified.** It may depend on CUDA, with no
+            # guarantee of working on gfx1151.
             "texture": False,
         },
         "params": {
@@ -92,25 +94,27 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "rembg": {"type": "bool", "default": True},
         },
         "notes": (
-            "gfx1151 では SDPA を fp32＋ヘッド分割=4 へ差し替える。enable_flashvdm は必須。"
-            "rembg は省略不可（ImageProcessorV2.recenter が 3ch 画像だと効かない）。"
-            "生成時間は同一設定で 235〜921 秒ばらつくので合否判定に使わない。"
+            "On gfx1151, SDPA falls back to fp32 over 4 chunked heads when fast attention "
+            "is unavailable, and enable_flashvdm is required. rembg cannot be skipped "
+            "(ImageProcessorV2.recenter does nothing useful on a 3-channel image). "
+            "Generation time varies between 235 and 921 seconds for identical settings, "
+            "so never use it as a pass/fail signal."
         ),
     }
 
 
 def m_load(params: dict[str, Any], progress: Any) -> dict[str, Any]:
-    """重みを読み込む（コールドは実測 77.6 秒・2 回目は 0 秒）。"""
+    """Load the weights (measured 77.6 s cold, 0 s on later calls)."""
     from . import shape
 
-    progress("load", "Hunyuan3D の重みを読み込む（初回は 80 秒前後かかる）")
+    progress("load", "loading the Hunyuan3D weights (about 80 seconds on the first run)")
     started = time.perf_counter()
     shape.load_pipeline()
     return {"loaded": True, "elapsed_sec": round(time.perf_counter() - started, 2)}
 
 
 def m_unload(params: dict[str, Any], progress: Any) -> dict[str, Any]:
-    """重みを解放して VRAM を返す。"""
+    """Release the weights and give the VRAM back."""
     from . import shape
 
     freed = shape.unload_pipeline()
@@ -124,26 +128,26 @@ _ALLOWED = frozenset(
 
 
 def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
-    """画像 1 枚 → 生のメッシュ（契約 §4・§5）。
+    """One image to a raw mesh.
 
-    **前処理（背景除去）はこのランナーの責任。** Hunyuan3D では省略できない。
-    **実寸化はしない。** mm へのスケールは下流（meshforge の forge）の仕事である。
+    **Preprocessing (background removal) is this runner's job** and cannot be
+    skipped for Hunyuan3D.
+    **Scaling to real-world size is not done here.** Millimetres are downstream
+    work (meshforge's forge).
     """
     from . import background, shape
 
     image_path = Path(str(params["image_path"]))
     out_dir = Path(str(params["out_dir"]))
     if not image_path.is_file():
-        raise FileNotFoundError(f"入力画像が無い: {image_path}")
+        raise FileNotFoundError(f"input image not found: {image_path}")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     unknown = set(params) - _ALLOWED - {"image_path", "out_dir"}
     if unknown:
-        raise ValueError(
-            f"知らない引数がある: {sorted(unknown)}（受け付けるのは {sorted(_ALLOWED)}）"
-        )
+        raise ValueError(f"unknown parameters: {sorted(unknown)} (accepted: {sorted(_ALLOWED)})")
 
-    progress("rembg", "背景を除去する")
+    progress("rembg", "removing the background")
     foreground, fraction = background.prepare_image(
         image_path,
         rembg=params.get("rembg"),
@@ -152,7 +156,7 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
     foreground_path = out_dir / "foreground.png"
     foreground.save(foreground_path)
 
-    progress("shape", "3D 形状を生成する（数分かかる。時間は一定しない）")
+    progress("shape", "generating the 3D shape (several minutes; the time is not consistent)")
     result = shape.generate_mesh(
         foreground,
         steps=params.get("steps"),
@@ -162,7 +166,7 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         progress=progress,
     )
 
-    progress("export", "書き出す")
+    progress("export", "writing the mesh")
     mesh_path = out_dir / "raw.ply"
     result.mesh.export(str(mesh_path))
 
@@ -176,10 +180,12 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         },
         "metrics": {
             "load_sec": round(result.load_sec, 2),
-            # **合否判定に使わない。** 同一設定で 235〜921 秒ばらつく。
+            # **Never use this as a pass/fail signal.** It varies between 235 and
+            # 921 seconds for identical settings.
             "gen_sec": round(result.gen_sec, 2),
             "vram_peak_gb": round(result.vram_peak_gb, 2),
-            # **速いアテンションが効いているか。** 効いていないと生成が数倍遅くなる。
+            # **Whether fast attention is in effect.** Without it generation is
+            # several times slower.
             "fast_attention": result.fast_attention,
         },
         "params": {
@@ -200,13 +206,13 @@ METHODS = {
 
 
 def main() -> int:
-    """要求を 1 件ずつ直列に処理する。
+    """Handle requests one at a time, in order.
 
     Returns:
-        終了コード。正常終了は 0。
+        The exit code. 0 on a clean exit.
     """
     out = install_stdout_guard()
-    print(f"[{NAME}] ランナーを起動した。", file=sys.stderr)
+    print(f"[{NAME}] runner started.", file=sys.stderr)
 
     for raw in sys.stdin:
         line = raw.lstrip("﻿").strip()
@@ -217,7 +223,7 @@ def main() -> int:
             request_id = int(request["id"])
             method_name = str(request["method"])
         except (ValueError, KeyError, TypeError) as exc:
-            print(f"[{NAME}] 解析できない要求を読み飛ばした: {exc}", file=sys.stderr)
+            print(f"[{NAME}] skipped an unparsable request: {exc}", file=sys.stderr)
             continue
 
         if method_name == "shutdown":
@@ -231,7 +237,7 @@ def main() -> int:
                 {
                     "id": request_id,
                     "event": "error",
-                    "error": {"type": "ValueError", "message": f"知らないメソッド: {method_name}"},
+                    "error": {"type": "ValueError", "message": f"unknown method: {method_name}"},
                 },
             )
             continue
@@ -239,7 +245,8 @@ def main() -> int:
         def progress(stage: str, message: str = "", _id: int = request_id) -> None:
             emit(out, {"id": _id, "event": "progress", "stage": stage, "message": message})
 
-        # **3D の常夜灯**（gfxlight.py）。compute だけだとドライバがクロックを上げない。
+        # **Clock keepalive** (gfxlight.py). Compute alone does not make the
+        # driver raise the clock.
         light: gfxlight.GfxLight | None = None
         if method_name == "image_to_mesh" and config.GFX_KEEPALIVE:
             light = gfxlight.GfxLight()
@@ -247,10 +254,11 @@ def main() -> int:
         try:
             result = method(dict(request.get("params") or {}), progress)
             if light is not None and isinstance(result.get("metrics"), dict):
-                # 生成の終わりまで点いていたか。False なら効いていない可能性がある。
+                # Whether it stayed alive to the end. False means it may not
+                # have taken effect.
                 result["metrics"]["gfx_keepalive"] = light.is_lit()
             emit(out, {"id": request_id, "event": "result", "result": result})
-        except Exception as exc:  # noqa: BLE001 - 何が来ても応答を返しきる
+        except Exception as exc:  # noqa: BLE001 - always answer, whatever happens
             import traceback
 
             traceback.print_exc()
@@ -266,7 +274,7 @@ def main() -> int:
             if light is not None:
                 light.stop()
 
-    print(f"[{NAME}] ランナーを終了する。", file=sys.stderr)
+    print(f"[{NAME}] runner exiting.", file=sys.stderr)
     return 0
 
 

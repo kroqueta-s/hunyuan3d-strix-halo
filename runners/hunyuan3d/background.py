@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: MIT
-"""背景除去（rembg・isnet-general-use・CPU・VRAM 不要）。
+"""Background removal (rembg, isnet-general-use, on the CPU, no VRAM needed).
 
-**このランナーの責任である**（契約 §4）。Hunyuan3D では省略できない。
+**This is the runner's responsibility** and cannot be skipped for Hunyuan3D.
 
-**これは省略できない前処理。** Hunyuan の `ImageProcessorV2.recenter()` は 3ch 画像だと
-マスクを全面 255 にするため、被写体の切り出しと再センタリングが一切効かない。
-**モデル内蔵の前景抽出は存在しない**ので、`rembg=False` は「モデルに委ねる」ではなく
-「既に背景除去済みの画像を渡す」という意味のバイパスである。
+**It is not optional preprocessing.** With a 3-channel image, Hunyuan's
+`ImageProcessorV2.recenter()` sets the entire mask to 255, so cropping and
+recentring the subject never happen. **The model has no built-in foreground
+extraction**, which makes `rembg=False` a bypass meaning "the image already has
+its background removed", not "let the model handle it".
 
-rembg のセッションは生成コストが高いので、モデル名ごとにキャッシュする。
+rembg sessions are expensive to create, so they are cached per model name.
 """
 
 from __future__ import annotations
@@ -23,33 +24,37 @@ from . import config
 
 _SESSIONS: dict[str, object] = {}
 
+
 def _install_pymatting_stub(cause: BaseException) -> None:
-    """`pymatting` の**使わない部分だけ**を差し替えて `rembg` を import 可能にする。
+    """Replace **only the unused parts** of `pymatting` so that `rembg` can be imported.
 
-    `rembg/bg.py` は `pymatting` を**モジュール先頭で無条件に import する**が、
-    実際に使うのは `alpha_matting=True` と `decontaminate=True` の経路だけで、
-    どちらも既定では off である。ここは既定のまま呼ぶので pymatting は不要。
+    `rembg/bg.py` **imports `pymatting` unconditionally at module level**, but
+    only uses it on the `alpha_matting=True` and `decontaminate=True` paths, both
+    of which are off by default. The defaults are what run here, so pymatting is
+    not needed.
 
-    それでも import が通らないと `rembg` ごと使えない。実測（2026-09-01）では
-    **Smart App Control が `llvmlite.dll` をブロックし**（WinError 4551）、
-    `pymatting -> numba -> llvmlite` の連鎖で `rembg` の import が失敗した。
+    The import still has to succeed, or `rembg` is unusable. Measured on
+    2026-09-01: **Smart App Control blocked `llvmlite.dll`** (WinError 4551), and
+    the `pymatting -> numba -> llvmlite` chain broke the `rembg` import.
 
-    **ベンダーコードは書き換えない**（`shape.py` の SDPA 差し替えと同じ流儀）。
-    本物が import できるときは何もしないので、SAC の判定が変われば自動的に元へ戻る。
-    差し込んだ関数は**呼ばれたら必ず落ちる**（黙って違う結果を返さない）。
+    **Upstream code is never modified** (the same approach as the SDPA
+    replacement in `shape.py`). Nothing happens when the real package imports, so
+    this reverts by itself once Smart App Control changes its mind. The
+    substituted functions **always raise when called**, never returning a
+    different result silently.
 
     Args:
-        cause: 本物の import が失敗した理由。診断のため stderr へ出す。
+        cause: Why the real import failed, printed to stderr for diagnosis.
     """
     import types
 
     def _unavailable(*args: object, **kwargs: object) -> None:
         raise RuntimeError(
-            "pymatting が使えない環境なので alpha matting は実行できない"
-            "（背景除去は alpha_matting=False の経路だけを使うこと）"
+            "pymatting is unavailable in this environment, so alpha matting cannot run "
+            "(background removal must stay on the alpha_matting=False path)"
         )
 
-    print(f"[background] pymatting を代替に差し替えた: {cause}", file=sys.stderr)
+    print(f"[background] substituted a stand-in for pymatting: {cause}", file=sys.stderr)
     for name in ("pymatting", "pymatting.alpha", "pymatting.foreground", "pymatting.util"):
         sys.modules.setdefault(name, types.ModuleType(name))
     for name, attr in (
@@ -63,10 +68,10 @@ def _install_pymatting_stub(cause: BaseException) -> None:
 
 
 def _rembg() -> tuple[Callable[..., object], Callable[..., object]]:
-    """`rembg` の `remove` と `new_session` を返す（必要なら代替を差し込んでから）。
+    """Return `rembg`'s `remove` and `new_session`, installing the stand-in first if needed.
 
     Returns:
-        `(remove, new_session)` の組。
+        The pair `(remove, new_session)`.
     """
     try:
         import pymatting  # noqa: F401
@@ -77,15 +82,14 @@ def _rembg() -> tuple[Callable[..., object], Callable[..., object]]:
     return remove, new_session
 
 
-
 def _session(model: str) -> object:
-    """rembg のセッションをモデル名ごとにキャッシュして返す。
+    """Return a rembg session, cached per model name.
 
     Args:
-        model: rembg のモデル名。
+        model: The rembg model name.
 
     Returns:
-        rembg のセッションオブジェクト。
+        The rembg session object.
     """
     if model not in _SESSIONS:
         _, new_session = _rembg()
@@ -94,14 +98,15 @@ def _session(model: str) -> object:
 
 
 def remove_background(image: Image.Image, *, model: str | None = None) -> Image.Image:
-    """前景を切り出してアルファ付き RGBA を返す。
+    """Cut out the foreground and return RGBA with an alpha channel.
 
     Args:
-        image: 入力画像（RGB でも RGBA でもよい）。
-        model: rembg のモデル名。None なら .env の既定（isnet-general-use）。
+        image: The input image; RGB or RGBA both work.
+        model: The rembg model name, or None for the `.env` default
+            (isnet-general-use).
 
     Returns:
-        **必ず RGBA** の画像。アルファが前景マスクになる。
+        An image that is **always RGBA**, with alpha as the foreground mask.
     """
     name = config.REMBG_MODEL if model is None else model
     remove, _ = _rembg()
@@ -109,13 +114,14 @@ def remove_background(image: Image.Image, *, model: str | None = None) -> Image.
 
 
 def foreground_fraction(image: Image.Image) -> float:
-    """アルファが 127 を超える画素の割合を返す（背景除去が効いたかの目安）。
+    """Return the fraction of pixels with alpha above 127, as a check that removal worked.
 
     Args:
-        image: 判定する画像。RGBA でなければ 1.0 を返す。
+        image: The image to inspect. Anything that is not RGBA returns 1.0.
 
     Returns:
-        前景率（0.0〜1.0）。**0 に近いと切り出しに失敗している**（入力画像を疑うこと）。
+        The foreground fraction, from 0.0 to 1.0. **A value near 0 means the
+        cut-out failed**, so suspect the input image.
     """
     if image.mode != "RGBA":
         return 1.0
@@ -128,18 +134,20 @@ def foreground_fraction(image: Image.Image) -> float:
 def prepare_image(
     path: Path, *, rembg: bool | None = None, model: str | None = None
 ) -> tuple[Image.Image, float]:
-    """画像ファイルを読み、必要なら背景除去して (RGBA 画像, 前景率) を返す。
+    """Load an image file and, if asked, remove its background.
 
-    `rembg=False` は「既に背景除去済みの画像を渡す」場合のバイパスであって、
-    モデルに前景抽出を委ねる意味ではない（内蔵の前景抽出は存在しない）。
+    Returns the RGBA image together with its foreground fraction.
+
+    `rembg=False` is a bypass for images whose background is already removed. It
+    does not hand foreground extraction to the model, which has none.
 
     Args:
-        path: 入力画像のパス。
-        rembg: 背景除去を行うか。None なら .env の既定。
-        model: rembg のモデル名。None なら .env の既定。
+        path: Path to the input image.
+        rembg: Whether to remove the background, or None for the `.env` default.
+        model: The rembg model name, or None for the `.env` default.
 
     Returns:
-        (RGBA 画像, 前景率) の組。
+        The pair (RGBA image, foreground fraction).
     """
     use = config.REMBG if rembg is None else rembg
     loaded: Image.Image = Image.open(path)

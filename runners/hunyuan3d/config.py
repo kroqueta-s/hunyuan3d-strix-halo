@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
-"""Hunyuan3D ランナーの設定（`.env` から読み込む）。
+"""Configuration for the Hunyuan3D runner, read from `.env`.
 
-**このランナーは自分の中で閉じている。** hearth の設定を参照しないので、
-`hunyuan3d-strix-halo` として独立リポジトリへ出しても、そのまま動く。
+**This runner is self-contained.** It never reads hearth's configuration, so it
+works unchanged as the standalone `hunyuan3d-strix-halo` repository.
 """
 
 from __future__ import annotations
@@ -12,8 +12,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# runners/hunyuan3d/config.py -> リポジトリのルート。
-# 独立リポジトリへ出したときも、同じ位置関係になるよう配置する。
+# runners/hunyuan3d/config.py -> the repository root.
 REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 load_dotenv(REPO_ROOT / ".env")
 
@@ -48,30 +47,37 @@ MC_RESOLUTION: int = _int("HUNYUAN3D_MC_RESOLUTION", 384)
 SHAPE_STEPS: int = _int("HUNYUAN3D_SHAPE_STEPS", 30)
 GUIDANCE_SCALE: float = _float("HUNYUAN3D_GUIDANCE_SCALE", 5.0)
 
-# SDPA を何ヘッドずつ計算するか。gfx1151 実測で 4 が最良（302 秒 / 11.6GB）。
-# 8 は速いが 17.7GB、16 は速度も VRAM も悪化する（511 秒 / 30.0GB）。**根拠なく変えない。**
+# Attention heads computed at once in the SDPA replacement. Measured best on
+# gfx1151 at 4 (302 s / 11.6 GB); 8 is faster but takes 17.7 GB, and 16 is worse
+# on both counts (511 s / 30.0 GB). **Do not change it without evidence.**
 ATTN_HEAD_CHUNK: int = _int("HUNYUAN3D_ATTN_HEAD_CHUNK", 4)
 
-# **off にしない。** ImageProcessorV2.recenter() は 3ch 画像だとマスクを全面 255 にする。
+# **Do not turn this off.** With a 3-channel image, `ImageProcessorV2.recenter()`
+# sets the entire mask to 255.
 REMBG: bool = _bool("HUNYUAN3D_REMBG", True)
 REMBG_MODEL: str = _str("HUNYUAN3D_REMBG_MODEL", "isnet-general-use")
 
 
-# **専用 VRAM の上限（GB）。** gfx1151 の専用 VRAM は 32GB だが、
-# `torch.cuda.mem_get_info` の total は共有メモリ込みの 43.87GB を返す。
-# そのため溢れても例外にならず、**黙って数倍遅くなる**（2026-09-01 に実測で踏んだ）。
-# ここを torch にも伝えて、超えたら OOM で**すぐ落ちる**ようにする。
+# **Cap on dedicated VRAM (GB).** gfx1151 has 32 GB of dedicated VRAM, but the
+# total from `torch.cuda.mem_get_info` is 43.87 GB because it counts shared
+# memory. Overflow therefore raises nothing and **silently becomes several times
+# slower** (measured on 2026-09-01). Passing the cap to torch as well turns that
+# into an **immediate OOM**.
 VRAM_LIMIT_GB: float = _float("HUNYUAN3D_VRAM_LIMIT_GB", 30.0)
 
-# 生存確認を流す間隔（秒）。**黙って長時間走らせない**ためのもの。
+# Heartbeat interval in seconds. It exists so that **nothing runs silently for a
+# long time**.
 HEARTBEAT_SEC: float = _float("HUNYUAN3D_HEARTBEAT_SEC", 10.0)
 
-# **torch を import する前に** TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL を立てるか。
-# 立てると flash / mem-efficient が使えるようになり、fp32＋ヘッド分割の経路を通らずに済む。
-# **後から os.environ へ入れても効かない**ので、`__main__.py` の先頭で置く。
+# Whether to set TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL **before torch is
+# imported**. It makes the flash and memory-efficient kernels available, so the
+# fp32 head-chunked path is never needed. **Setting it afterwards has no
+# effect**, so it goes at the top of `__main__.py`.
 FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
 
-# 生成中だけ「3D の常夜灯」を点けるか（`gfxlight.py`）。Windows の AMD ドライバは
-# compute だけの負荷ではクロックを上げない（実測：GEMM 単独 600 MHz / 3D 併用 2.35 GHz・
-# 4.3 倍）。点かなくても生成は従来どおり動く。効いたかは metrics.gfx_keepalive に載る。
+# Whether to run the clock keepalive during generation (`gfxlight.py`). The AMD
+# Windows driver does not raise the clock for compute-only work (measured: GEMM
+# alone 600 MHz, with 3D alongside 2.35 GHz, a 4.3x difference). Generation
+# works as before if it fails to start; `metrics.gfx_keepalive` records whether
+# it was alive.
 GFX_KEEPALIVE: bool = _bool("HUNYUAN3D_GFX_KEEPALIVE", True)
