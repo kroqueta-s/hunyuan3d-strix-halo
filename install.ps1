@@ -17,7 +17,7 @@
 
 .EXAMPLE
     .\install.ps1
-    .\install.ps1 -Root D:\models\trellis
+    .\install.ps1 -Root D:\models\hunyuan3d
 #>
 [CmdletBinding()]
 param(
@@ -75,8 +75,12 @@ Write-Host "==> Installing dependencies"
 & $py -m pip install --no-cache-dir -r (Join-Path $repo "requirements.txt")
 
 # 5. Weights ------------------------------------------------------------------
-Write-Host "==> Downloading weights (shape stage only)"
-& $py -c "from huggingface_hub import snapshot_download; snapshot_download('$WeightsRepo', local_dir=r'$weights')"
+# Upstream resolves weights as HY3DGEN_MODELS/<model id>/<subfolder>, so the
+# files must land under weights\tencent\Hunyuan3D-2.1. Only the shape stage is
+# downloaded (dit + vae, about 7.5 GB); the texture stage is unused here.
+Write-Host "==> Downloading weights (shape stage only, about 7.5 GB)"
+$weightsDir = Join-Path $weights $WeightsRepo.Replace("/", "\")
+& $py -c "from huggingface_hub import snapshot_download; snapshot_download('$WeightsRepo', local_dir=r'$weightsDir', allow_patterns=['hunyuan3d-dit-v2-1/*', 'hunyuan3d-vae-v2-1/*', 'LICENSE', 'Notice.txt'])"
 
 # 6. .env ---------------------------------------------------------------------
 $envPath = Join-Path $repo ".env"
@@ -87,13 +91,21 @@ if (-not (Test-Path $envPath)) {
         Replace("__WEIGHTS__", $weights) | Set-Content -Path $envPath -Encoding utf8
 }
 
-# 7. Verify the shims before trusting any mesh --------------------------------
-Write-Host "==> Checking the environment"
-& $py (Join-Path $repo "tests\test_shims.py")
-& $py (Join-Path $repo "tests\test_raster.py")
+# 7. Smoke test: the runner starts and answers without loading weights --------
+Write-Host "==> Checking that the runner starts (capabilities round-trip)"
+Push-Location $repo
+$reply = '{"id":1,"method":"capabilities"}', '{"id":2,"method":"shutdown"}' | & $py -m runners.hunyuan3d
+Pop-Location
+if (-not ($reply -match '"image_to_mesh": true')) {
+    throw "the runner did not answer capabilities: $reply"
+}
+Write-Host "    capabilities OK"
 
 Write-Host ""
-Write-Host "Done. Point hearth at this checkout:"
+Write-Host "Done. Generate a first mesh with:"
+Write-Host "  $py $repo\tools\run_single.py --image $repo\assets\sample.png --out $Root\out"
+Write-Host ""
+Write-Host "Or point hearth at this checkout:"
 Write-Host "  HEARTH_RUNNER_HUNYUAN3D_PYTHON=$py"
 Write-Host "  HEARTH_RUNNER_HUNYUAN3D_MODULE=runners.hunyuan3d"
 Write-Host "  HEARTH_RUNNER_HUNYUAN3D_CWD=$repo"

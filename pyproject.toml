@@ -1,5 +1,5 @@
-[project]
-name = "hearth"
+﻿[project]
+name = "hunyuan3d-strix-halo"
 version = "0.0.0"
 description = "Hunyuan3D 2.1 shape runner for AMD Strix Halo (gfx1151) on Windows ROCm"
 requires-python = ">=3.12"

@@ -1,5 +1,7 @@
 # hunyuan3d-strix-halo
 
+[![test](https://github.com/kroqueta-s/hunyuan3d-strix-halo/actions/workflows/test.yml/badge.svg)](https://github.com/kroqueta-s/hunyuan3d-strix-halo/actions/workflows/test.yml)
+
 **[Hunyuan3D 2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) image-to-mesh
 (shape stage) on AMD Strix Halo (gfx1151), Windows, ROCm.**
 
@@ -17,8 +19,9 @@ never by editing upstream code:
 2. **`enable_flashvdm` is required.** The default volume decoder queries every
    point of a 385³ grid and does not finish in 30 minutes.
 
-This is a runner for [hearth](https://github.com/kroqueta-s/hearth): it speaks
-one JSON object per line over stdin/stdout. It also runs standalone.
+The runner speaks one JSON object per line over stdin/stdout, so any
+orchestrator can drive it as a child process. It also runs standalone (see
+Quickstart).
 
 | Input image | Mesh (4 views) |
 |---|---|
@@ -30,6 +33,7 @@ is the reference specimen for the measurements below.*
 ## Prerequisites
 
 - Windows 11
+- Git
 - An AMD GPU supported by ROCm on Windows (verified on **Strix Halo / gfx1151**,
   Radeon 8060S)
 - AMD Adrenalin driver with **ROCm 7.2.1** support
@@ -44,6 +48,11 @@ git clone https://github.com/kroqueta-s/hunyuan3d-strix-halo
 cd hunyuan3d-strix-halo
 .\install.ps1
 ```
+
+That creates a virtual environment, installs ROCm PyTorch, clones upstream at a
+pinned commit, downloads the shape-stage weights (about 7.5 GB), writes `.env`,
+and checks that the runner starts. If PowerShell refuses to run the script, use
+`powershell -ExecutionPolicy Bypass -File .\install.ps1`.
 
 ## Quickstart
 
