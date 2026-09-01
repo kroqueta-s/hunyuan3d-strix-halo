@@ -13,6 +13,8 @@ einops==0.8.2
 scikit-image==0.26.0
 scipy==1.18.1
 trimesh==5.0.0
+# Upstream's preprocessors.py imports cv2 at module level.
+opencv-python-headless==5.0.0.93
 pygltflib==1.16.5
 pymeshlab==2025.7.post1
 tqdm==4.70.0
