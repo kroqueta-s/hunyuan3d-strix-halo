@@ -39,6 +39,8 @@ BACKEND = "hunyuan3d21"
 
 _PIPELINE: Any = None
 _LOAD_SEC: float = 0.0
+# 速いアテンション（AOTriton）が効いているか。**metrics に載せて記録に残す。**
+_FAST_ATTENTION: bool = False
 
 
 class _DeviceWatch:
@@ -116,31 +118,70 @@ class _DeviceWatch:
         self._t.join(timeout=5)
 
 
-def _install_sdpa_shim(head_chunk: int, fp32: bool = True) -> None:
-    """gfx1151/Windows/ROCm 7.2.1 向けに SDPA を差し替える。
+# **差し替える前の本物**を捕まえておく。シムの中から呼ぶと自分自身を呼ぶことになる。
+_TORCH_SDPA = F.scaled_dot_product_attention
 
-    2 つの問題を同時に解く:
+
+def fast_attention_available() -> bool:
+    """flash / mem-efficient が**実際に走るか**を小さなテンソルで試す。
+
+    gfx1151 では `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` を
+    **torch を import する前に**置いたときだけ AOTriton の実装が有効になる
+    （後から `os.environ` へ入れても効かないことを実測した）。
+    """
+    if not torch.cuda.is_available():
+        return False
+    try:
+        from torch.nn.attention import SDPBackend, sdpa_kernel
+    except ImportError:
+        return False
+    probe = torch.randn(1, 2, 64, 64, device="cuda", dtype=torch.float16)
+    for backend in (SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION):
+        try:
+            with sdpa_kernel(backend):
+                _TORCH_SDPA(probe, probe, probe)
+            return True
+        except Exception:  # noqa: BLE001 - 使えないことを知りたいだけ
+            continue
+    return False
+
+
+def _install_sdpa_shim(head_chunk: int, fp32: bool | None = None) -> bool:
+    """gfx1151/Windows/ROCm 向けに SDPA を差し替える。
+
+    元々は 2 つの問題を同時に解くための細工だった:
 
     1. **バックエンド不在** — hunyuandit.py は 3 箇所で
        ``sdp_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=True)``
-       と呼ぶが、本機で実測すると flash も mem_efficient も「No available kernel」。
-       使えるのは math だけなので、この指定は**唯一動くバックエンドを塞いでいる**。
+       と呼ぶが、**この指定は唯一動くバックエンド（math）を塞いでいた**
+    2. **fp16 math の数値破綻** — math backend は online softmax を持たず
+       ``q @ k^T``（seq=4096）を入力 dtype のまま実体化する。fp16 の上限 65504 を
+       超えて SDF 場がノイズ化する（鏡像入力で決定論的に再現した）
 
-    2. **fp16 math の数値破綻** — math backend は flash のような online softmax を持たず
-       ``q @ k^T``（seq=4096）を入力 dtype のまま実体化する。fp16 の上限は 65504 で、
-       入力によっては溢れて SDF 場がノイズ化する（鏡像入力で決定論的に再現した）。
-       さらに全ヘッド同時だと中間テンソルが 4GB 級になり専用 VRAM を圧迫する。
+    **2026-09-01 に前提が変わった。** `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` を
+    torch より先に置くと **flash / mem-efficient が使えるようになる**（実測：seq=4096 で
+    0.135s → 0.012s）。flash は online softmax なので `q @ k^T` を実体化せず、
+    **2 の破綻の原因そのものが無くなる。**
 
-    対策として ``F.scaled_dot_product_attention`` を fp32 計算＋ヘッド分割の実装に
-    差し替える。**ベンダーコードは書き換えない**（再 clone・更新で壊れるため）。
+    そこで、速い経路が使えるなら **`sdp_kernel` の封じだけを解いて本物に任せる**。
+    使えないときだけ従来どおり fp32＋ヘッド分割へ落ちる。**判断は実測で行い、憶測しない。**
 
     Args:
-        head_chunk: 一度に計算するヘッド数。VRAM ピークと速度を決める。
-            gfx1151 実測では 4 が最良（302 秒 / 11.6GB）。8 は 235 秒だが 17.7GB、
-            16 は 511 秒 / 30.0GB で速度も VRAM も悪化する。
-        fp32: False にすると fp16 のまま計算する（破綻の再現用。実運用では True）。
+        head_chunk: fp32 経路で一度に計算するヘッド数。速い経路では使わない。
+        fp32: None なら**実測で決める**。True/False で強制もできる（破綻の再現用）。
+
+    Returns:
+        速い経路が有効か。**`metrics` へ載せて記録に残す。**
     """
+    # ベンダーが flash と mem_efficient だけを許す指定をしても落ちないようにする。
+    # 速い経路が使えるなら、この封じを解くだけで本物の flash が選ばれる。
     torch.backends.cuda.sdp_kernel = lambda *a, **kw: contextlib.nullcontext()
+
+    use_fp32 = (not fast_attention_available()) if fp32 is None else fp32
+    if not use_fp32:
+        F.scaled_dot_product_attention = _TORCH_SDPA
+        print("[shape] fast attention=yes（AOTriton の flash に任せる）", file=sys.stderr)
+        return True
 
     def sdpa(
         query: torch.Tensor,
@@ -156,15 +197,14 @@ def _install_sdpa_shim(head_chunk: int, fp32: bool = True) -> None:
             # 本モデルの推論経路では使われない。来たら気付けるように落とす。
             raise NotImplementedError("patched SDPA supports plain attention only")
         out_dtype = query.dtype
-        compute_dtype = torch.float32 if fp32 else out_dtype
         d = query.shape[-1]
         sc = scale if scale is not None else (1.0 / math.sqrt(d))
         heads = query.shape[1]
         outs = []
         for i in range(0, heads, head_chunk):
-            q = query[:, i : i + head_chunk].to(compute_dtype)
-            k = key[:, i : i + head_chunk].to(compute_dtype)
-            v = value[:, i : i + head_chunk].to(compute_dtype)
+            q = query[:, i : i + head_chunk].float()
+            k = key[:, i : i + head_chunk].float()
+            v = value[:, i : i + head_chunk].float()
             attn = torch.matmul(q, k.transpose(-1, -2)) * sc
             attn = torch.softmax(attn, dim=-1)
             outs.append(torch.matmul(attn, v).to(out_dtype))
@@ -172,6 +212,8 @@ def _install_sdpa_shim(head_chunk: int, fp32: bool = True) -> None:
         return torch.cat(outs, dim=1)
 
     F.scaled_dot_product_attention = sdpa
+    print("[shape] fast attention=no（fp32＋ヘッド分割へ落ちる）", file=sys.stderr)
+    return False
 
 
 @dataclass(frozen=True)
@@ -183,6 +225,7 @@ class ShapeResult:
     load_sec: パイプライン読み込み秒。2 回目以降はキャッシュ済みなので同じ値が返る。
     gen_sec: 生成秒。**このハードでは不安定な指標**なので合否判定に使わない。
     vram_peak_gb: デバイス実使用量のピーク（GB）。
+    fast_attention: 速いアテンション（AOTriton の flash）が効いているか。
     steps: 推論ステップ数。
     octree_resolution: marching cubes の octree 解像度。
     guidance_scale: guidance scale。
@@ -194,6 +237,7 @@ class ShapeResult:
     load_sec: float
     gen_sec: float
     vram_peak_gb: float
+    fast_attention: bool
     steps: int
     octree_resolution: int
     guidance_scale: float
@@ -232,7 +276,8 @@ def load_pipeline() -> Any:
     if repo not in sys.path:
         sys.path.insert(0, repo)
 
-    _install_sdpa_shim(head_chunk=config.ATTN_HEAD_CHUNK)
+    global _FAST_ATTENTION
+    _FAST_ATTENTION = _install_sdpa_shim(head_chunk=config.ATTN_HEAD_CHUNK)
     apply_vram_limit()
 
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
@@ -315,6 +360,7 @@ def generate_mesh(
         load_sec=float(load_sec),
         gen_sec=float(gen_sec),
         vram_peak_gb=float(sampler.peak_used_gb),
+        fast_attention=_FAST_ATTENTION,
         steps=int(steps),
         octree_resolution=int(octree_resolution),
         guidance_scale=float(guidance_scale),

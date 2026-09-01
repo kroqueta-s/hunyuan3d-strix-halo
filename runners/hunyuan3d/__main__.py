@@ -22,6 +22,15 @@ import time
 from pathlib import Path
 from typing import Any, TextIO
 
+from . import config
+
+# **torch より先に置かないと効かない**（後から os.environ へ入れても無視される）。
+# 立てると gfx1151 で flash / mem-efficient が使えるようになり、
+# fp32＋ヘッド分割という最も遅い経路を通らずに済む（実測：seq=4096 で 0.135s → 0.012s）。
+# config は dotenv しか読まないので、ここで import しても torch は入ってこない。
+if config.FAST_ATTENTION:
+    os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
+
 NAME = "hunyuan3d"
 VERSION = "2.1"
 
@@ -170,6 +179,8 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             # **合否判定に使わない。** 同一設定で 235〜921 秒ばらつく。
             "gen_sec": round(result.gen_sec, 2),
             "vram_peak_gb": round(result.vram_peak_gb, 2),
+            # **速いアテンションが効いているか。** 効いていないと生成が数倍遅くなる。
+            "fast_attention": result.fast_attention,
         },
         "params": {
             "steps": result.steps,

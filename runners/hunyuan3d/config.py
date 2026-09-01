@@ -65,3 +65,8 @@ VRAM_LIMIT_GB: float = _float("HUNYUAN3D_VRAM_LIMIT_GB", 30.0)
 
 # 生存確認を流す間隔（秒）。**黙って長時間走らせない**ためのもの。
 HEARTBEAT_SEC: float = _float("HUNYUAN3D_HEARTBEAT_SEC", 10.0)
+
+# **torch を import する前に** TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL を立てるか。
+# 立てると flash / mem-efficient が使えるようになり、fp32＋ヘッド分割の経路を通らずに済む。
+# **後から os.environ へ入れても効かない**ので、`__main__.py` の先頭で置く。
+FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
