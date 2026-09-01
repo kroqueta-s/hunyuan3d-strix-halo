@@ -5,11 +5,12 @@
 
 .DESCRIPTION
     Creates a dedicated virtual environment, installs ROCm PyTorch, clones the
-    upstream Hunyuan3D-2.1 repository at a pinned commit, downloads the weights and
-    writes a .env file.
+    upstream Hunyuan3D-2.1 repository at a pinned commit, downloads the weights
+    and writes a .env file.
 
-    **No CUDA-only package is installed.** the attention path is replaced at launch
-    time by a pure-torch shim in runners/hunyuan3d/. Upstream code is never patched.
+    **No CUDA-only package is installed.** The attention path is replaced at
+    launch time by a pure-torch shim in runners/hunyuan3d/. Upstream code is
+    never patched.
 
 .PARAMETER Root
     Where the virtual environment, the upstream clone and the weights go.
@@ -27,7 +28,15 @@ param(
     [string]$Python = "py -3.12"
 )
 
-$ErrorActionPreference = "Stop"
+# Native tools (git, pip) report progress on stderr. Under output redirection,
+# Windows PowerShell 5.1 turns those lines into error records, and a "Stop"
+# preference would kill the script on the first one. So the preference stays
+# "Continue" and every native step is checked through its exit code instead.
+$ErrorActionPreference = "Continue"
+function Assert-Ok([string]$step) {
+    if ($LASTEXITCODE) { throw "$step failed with exit code $LASTEXITCODE" }
+}
+
 # $PSScriptRoot can be empty while param defaults are evaluated under
 # Windows PowerShell 5.1, so the paths are resolved here instead.
 $repo = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
@@ -54,8 +63,10 @@ New-Item -ItemType Directory -Force -Path $Root | Out-Null
 if (-not (Test-Path $py)) {
     Write-Host "==> Creating virtual environment"
     & cmd /c "$Python -m venv `"$venv`""
+    Assert-Ok "virtual environment creation"
 }
 & $py -m pip install --upgrade pip
+Assert-Ok "pip upgrade"
 
 # 2. ROCm PyTorch -------------------------------------------------------------
 # torch requires the `rocm` meta-package, which lives on the same index.
@@ -63,20 +74,15 @@ if (-not (Test-Path $py)) {
 Write-Host "==> Installing ROCm PyTorch"
 & $py -m pip install --no-cache-dir --find-links $TorchIndex `
     "torch==$TorchVersion" "torchvision==$TorchvisionVersion"
+Assert-Ok "PyTorch installation"
 
 # 3. Upstream repository (never forked, never patched) ------------------------
-# git reports progress on stderr. Under output redirection, PowerShell 5.1
-# turns native stderr into error records, and ErrorActionPreference=Stop would
-# kill the script on the first progress line - so git runs with it relaxed and
-# its exit code is checked instead.
-$ErrorActionPreference = "Continue"
 if (-not (Test-Path $upstream)) {
     Write-Host "==> Cloning upstream Hunyuan3D-2.1"
-    # A shallow clone: a full history (TRELLIS in particular) can stall for
-    # minutes in server-side pack preparation. The pinned commit is fetched
-    # right below, also shallow.
+    # A shallow clone: a full history can stall for minutes in server-side pack
+    # preparation. The pinned commit is fetched right below, also shallow.
     git clone --depth 1 $UpstreamUrl $upstream 2>&1 | Out-Host
-    if ($LASTEXITCODE) { throw "git clone failed ($LASTEXITCODE)" }
+    Assert-Ok "git clone"
 }
 Push-Location $upstream
 git fetch --depth 1 origin $UpstreamCommit 2>&1 | Out-Host
@@ -86,11 +92,11 @@ if ($LASTEXITCODE) { Pop-Location; throw "git checkout failed ($LASTEXITCODE)" }
 git submodule update --init --recursive 2>&1 | Out-Host
 if ($LASTEXITCODE) { Pop-Location; throw "git submodule update failed ($LASTEXITCODE)" }
 Pop-Location
-$ErrorActionPreference = "Stop"
 
 # 4. Pure-python dependencies -------------------------------------------------
 Write-Host "==> Installing dependencies"
 & $py -m pip install --no-cache-dir -r (Join-Path $repo "requirements.txt")
+Assert-Ok "dependency installation"
 
 # 5. Weights ------------------------------------------------------------------
 # Upstream resolves weights as HY3DGEN_MODELS/<model id>/<subfolder>, so the
@@ -99,6 +105,7 @@ Write-Host "==> Installing dependencies"
 Write-Host "==> Downloading weights (shape stage only, about 7.5 GB)"
 $weightsDir = Join-Path $weights $WeightsRepo.Replace("/", "\")
 & $py -c "from huggingface_hub import snapshot_download; snapshot_download('$WeightsRepo', local_dir=r'$weightsDir', allow_patterns=['hunyuan3d-dit-v2-1/*', 'hunyuan3d-vae-v2-1/*', 'LICENSE', 'Notice.txt'])"
+Assert-Ok "weights download"
 
 # 6. .env ---------------------------------------------------------------------
 $envPath = Join-Path $repo ".env"
