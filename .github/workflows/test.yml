@@ -1,0 +1,16 @@
+name: test
+
+on: [push, pull_request]
+
+jobs:
+  sanity:
+    # This runner has no numerical shim test: its only shim swaps the SDPA
+    # implementation, which is exercised implicitly by every generation.
+    # CI checks that everything at least parses and imports cleanly.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m compileall runners tools

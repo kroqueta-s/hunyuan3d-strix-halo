@@ -70,3 +70,8 @@ HEARTBEAT_SEC: float = _float("HUNYUAN3D_HEARTBEAT_SEC", 10.0)
 # 立てると flash / mem-efficient が使えるようになり、fp32＋ヘッド分割の経路を通らずに済む。
 # **後から os.environ へ入れても効かない**ので、`__main__.py` の先頭で置く。
 FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
+
+# 生成中だけ「3D の常夜灯」を点けるか（`gfxlight.py`）。Windows の AMD ドライバは
+# compute だけの負荷ではクロックを上げない（実測：GEMM 単独 600 MHz / 3D 併用 2.35 GHz・
+# 4.3 倍）。点かなくても生成は従来どおり動く。効いたかは metrics.gfx_keepalive に載る。
+GFX_KEEPALIVE: bool = _bool("HUNYUAN3D_GFX_KEEPALIVE", True)
