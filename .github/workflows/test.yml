@@ -19,3 +19,6 @@ jobs:
       # The UV hole-filler replaces a C++ extension, so its behaviour is pinned
       # here. It needs numpy and nothing else.
       - run: python tests/test_inpaint.py
+      # The step counter has no dependencies at all, and a wrong count is
+      # worse than no count, so it is checked on every push.
+      - run: python tests/test_steps.py

@@ -34,10 +34,15 @@ from PIL import Image
 
 from . import config
 
+# Imported by name, not as a module: `generate_mesh` has a local called `steps`.
+from .steps import StepCounter, count_scheduler
+
 BACKEND = "hunyuan3d21"
 
 _PIPELINE: Any = None
 _LOAD_SEC: float = 0.0
+# Counts the denoising loop. One per pipeline, rebound for each request.
+_STEPS = StepCounter()
 # Whether fast attention (AOTriton) is in effect. **Recorded in metrics.**
 _FAST_ATTENTION: bool = False
 
@@ -348,6 +353,11 @@ def generate_mesh(
     pipe = load_pipeline()
     load_sec = _LOAD_SEC
 
+    # **Report the denoising steps.** The scheduler is the authority on how many
+    # there are, so the count follows whatever upstream actually asked for.
+    _STEPS.bind(progress, "shape", "denoising")
+    count_scheduler(pipe.scheduler, _STEPS)
+
     torch.cuda.reset_peak_memory_stats()
     sampler = _DeviceWatch(
         progress=progress,
@@ -356,16 +366,22 @@ def generate_mesh(
         limit_gb=config.VRAM_LIMIT_GB,
     )
     t0 = time.perf_counter()
-    with sampler:
-        meshes = pipe(
-            image=image,
-            num_inference_steps=steps,
-            octree_resolution=octree_resolution,
-            guidance_scale=guidance_scale,
-            mc_algo="mc",
-            generator=torch.Generator(device="cuda").manual_seed(seed),
-            output_type="trimesh",
-        )
+    try:
+        with sampler:
+            meshes = pipe(
+                image=image,
+                num_inference_steps=steps,
+                octree_resolution=octree_resolution,
+                guidance_scale=guidance_scale,
+                mc_algo="mc",
+                generator=torch.Generator(device="cuda").manual_seed(seed),
+                output_type="trimesh",
+            )
+    finally:
+        # **Let go of this request's sink.** The hook stays on the scheduler for
+        # the next generation, but a step must never be reported against a
+        # request that has already been answered.
+        _STEPS.bind(None, "shape")
     gen_sec = time.perf_counter() - t0
 
     mesh = meshes[0]

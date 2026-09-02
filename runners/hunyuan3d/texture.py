@@ -65,9 +65,12 @@ from pathlib import Path
 from typing import Any
 
 from . import config, inpaint, raster
+from .steps import StepCounter, count_scheduler
 
 _PIPELINE: Any = None
 _LOAD_SEC: float = 0.0
+# Counts the multi-view denoising loop. One per pipeline, rebound per request.
+_STEPS = StepCounter()
 
 
 @dataclass(frozen=True)
@@ -423,18 +426,27 @@ def texture_mesh(
     # shape stage's watcher does the job unchanged.
     from .shape import _DeviceWatch
 
-    with _in_upstream(), _DeviceWatch(
-        progress=progress,
-        stage="texture",
-        heartbeat_sec=config.HEARTBEAT_SEC,
-        limit_gb=config.VRAM_LIMIT_GB,
-    ):
-        pipeline(
-            mesh_path=str(staged),
-            image_path=str(image_path),
-            output_mesh_path=str(output),
-            save_glb=save_glb,
-        )
+    # **Report the multi-view denoising steps.** They are the bulk of the bake,
+    # and upstream disables its own progress bar, so counting the scheduler is
+    # the only way to see inside this.
+    _STEPS.bind(progress, "texture", "multi-view denoising")
+    count_scheduler(pipeline.models["multiview_model"].pipeline.scheduler, _STEPS)
+
+    try:
+        with _in_upstream(), _DeviceWatch(
+            progress=progress,
+            stage="texture",
+            heartbeat_sec=config.HEARTBEAT_SEC,
+            limit_gb=config.VRAM_LIMIT_GB,
+        ):
+            pipeline(
+                mesh_path=str(staged),
+                image_path=str(image_path),
+                output_mesh_path=str(output),
+                save_glb=save_glb,
+            )
+    finally:
+        _STEPS.bind(None, "texture")
     texture_sec = time.perf_counter() - started
 
     if not output.is_file():

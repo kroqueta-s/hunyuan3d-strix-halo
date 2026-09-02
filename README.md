@@ -79,9 +79,21 @@ Generate a mesh from the bundled sample, no JSON required:
 .venv\Scripts\python.exe tools\run_single.py --image assets\sample.png --out C:\out
 ```
 
-Progress streams to the console; the mesh lands in `C:\out\raw.ply`. To
-reproduce the benchmark below, run the same command **twice and time the second
-run**: the first run includes MIOpen's one-time kernel tuning, which says
+The mesh lands in `C:\out\raw.ply`. Progress streams to the console, with a bar
+for every stage whose steps can be counted:
+
+```
+[   46.3s] shape      [############------------]  50%  (15/30)
+[  318.6s] texture    [###########-------------]  46%  (7/15)
+```
+
+**The percentage is counted, never estimated**, and there is no ETA on purpose:
+the same texture loop ran 167 s per step on its first run and 14.7 s per step
+afterwards, so any prediction would mislead exactly when it mattered. Stages
+whose length is not known report a step number and nothing more.
+
+To reproduce the benchmark below, run the same command **twice and time the
+second run**: the first run includes MIOpen's one-time kernel tuning, which says
 nothing about steady-state speed.
 
 ## Use
