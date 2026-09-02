@@ -3,10 +3,10 @@
 [![test](https://github.com/kroqueta-s/hunyuan3d-strix-halo/actions/workflows/test.yml/badge.svg)](https://github.com/kroqueta-s/hunyuan3d-strix-halo/actions/workflows/test.yml)
 
 **[Hunyuan3D 2.1](https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1) image-to-mesh
-(shape stage) on AMD Strix Halo (gfx1151), Windows, ROCm.**
+on AMD Strix Halo (gfx1151), Windows, ROCm — shape **and** texture.**
 
-Upstream runs on this hardware only after two changes made from the launcher —
-never by editing upstream code:
+Upstream's shape stage runs on this hardware only after two changes made from
+the launcher — never by editing upstream code:
 
 1. **Scaled dot-product attention is handled at launch.** With
    `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` set before torch is imported
@@ -18,6 +18,14 @@ never by editing upstream code:
    reported in `metrics.fast_attention`.
 2. **`enable_flashvdm` is required.** The default volume decoder queries every
    point of a 385³ grid and does not finish in 30 minutes.
+
+The **texture stage** (`install.ps1 -Texture`) needs more, because it ships two
+compiled extensions and assumes a CUDA toolchain. Both are replaced by
+pure-python equivalents that reproduce upstream's own procedure — a z-buffer
+rasterizer ([`raster.py`](runners/hunyuan3d/raster.py)) and a UV hole-filler
+([`inpaint.py`](runners/hunyuan3d/inpaint.py)) — so **nothing has to be
+compiled**. The rest of what it takes is listed in
+[`texture.py`](runners/hunyuan3d/texture.py).
 
 The runner speaks one JSON object per line over stdin/stdout, so any
 orchestrator can drive it as a child process. It also runs standalone (see
@@ -38,8 +46,8 @@ is the reference specimen for the measurements below.*
   Radeon 8060S)
 - AMD Adrenalin driver with **ROCm 7.2.1** support
 - **Python 3.12**
-- ~20 GB of disk (venv + upstream clone + weights)
-- ~15 GB of free VRAM at peak
+- ~20 GB of disk (venv + upstream clone + weights), ~31 GB with the texture stage
+- ~15 GB of free VRAM at peak (~25 GB with the texture stage)
 
 ## Install
 
@@ -53,6 +61,14 @@ That creates a virtual environment, installs ROCm PyTorch, clones upstream at a
 pinned commit, downloads the shape-stage weights (about 7.5 GB), writes `.env`,
 and checks that the runner starts. If PowerShell refuses to run the script, use
 `powershell -ExecutionPolicy Bypass -File .\install.ps1`.
+
+Add `-Texture` to also install the texture stage. It costs about 11 GB more in
+weights (the paint model plus DINOv2, which upstream requires) and takes tens of
+minutes per bake, so it is opt-in:
+
+```powershell
+.\install.ps1 -Texture
+```
 
 ## Quickstart
 
@@ -79,7 +95,37 @@ nothing about steady-state speed.
 ```
 
 `image_to_mesh` writes `raw.ply` and `foreground.png`. Parameters: `steps`,
-`octree_resolution`, `guidance_scale`, `seed`, `rembg`.
+`octree_resolution`, `guidance_scale`, `seed`, `rembg`, `texture`.
+
+With the texture stage installed there are two more ways in:
+
+```json
+{"id": 3, "method": "image_to_mesh", "params": {"image_path": "C:/in.png", "out_dir": "C:/out", "texture": true}}
+{"id": 4, "method": "texture_mesh", "params": {"mesh_path": "C:/mesh.ply", "image_path": "C:/in.png", "out_dir": "C:/out"}}
+```
+
+Both write `textured.obj` with `textured.jpg` (albedo), `textured_metallic.jpg`
+and `textured_roughness.jpg`. `texture_mesh` takes a mesh from anywhere — this
+runner's own output, another generator, or a hand-made model.
+
+**The textured mesh is not the detailed one.** Upstream decimates to 40,000
+faces before unwrapping UVs, so `image_to_mesh` with `texture: true` writes both
+`raw.ply` (full detail, untextured) and `textured.obj` (40,000 faces, textured).
+The result reports the face count either way.
+
+GLB is not written: upstream converts through `bpy` (Blender, GPL), which this
+repository does not install. Convert downstream if you need it.
+
+## Tests
+
+Two stand-ins replace compiled extensions, so both are pinned by tests:
+
+```powershell
+.venv\Scripts\python.exe tests\test_raster.py    # the z-buffer rasterizer (needs torch)
+.venv\Scripts\python.exe tests\test_inpaint.py   # the UV hole-filler (numpy only)
+```
+
+CI runs the second one; the first needs a GPU and runs here.
 
 ## The GPU idles at 600 MHz unless something renders
 
@@ -102,12 +148,17 @@ was alive is reported in `metrics.gfx_keepalive`. Measured on the same image:
 One image (`assets/sample.png`), clock keepalive on, flash attention on,
 2026-09-02:
 
-| Setting | Load | Generate | Peak VRAM | Output |
+| Stage | Load | Run | Peak VRAM | Output |
 |---|--:|--:|--:|---|
-| `steps=30`, `octree=384` (default) | 32 s | **86 s** | 11.3 GB | 1,227,315 faces, watertight |
+| Shape, `steps=30`, `octree=384` (default) | 32 s | **86 s** | 11.3 GB | 1,227,315 faces, watertight |
+| Texture, 6 views at 512 px, 4096 px texture | 44 s | **220 s** | 24.6 GB | 40,000 faces, albedo + metallic + roughness |
 
 Lowering `octree_resolution` opens holes (low-resolution marching cubes); do
 not trade quality for speed here.
+
+**The first texture bake takes far longer than the table says** — 2,509 s here
+against 220 s afterwards. That is MIOpen tuning kernels once per machine, the
+same one-time cost the shape stage pays. Time the second run, not the first.
 
 ## Troubleshooting
 
@@ -123,8 +174,16 @@ not trade quality for speed here.
 
 ## Limits
 
-- **Shape stage only.** The texture stage is untested here and likely needs
-  CUDA-only components.
+- **The texture stage rewrites the geometry.** Upstream decimates to 40,000
+  faces before unwrapping UVs, and that is upstream's design, not a setting.
+  Keep `raw.ply` when the detail matters.
+- **No GLB.** Upstream's converter imports `bpy` (Blender, GPL), which would
+  cost this repository its MIT licence, so a stand-in is installed that imports
+  cleanly and raises if called. The texture is written as `.obj` plus images.
+- **The texture stage needs the network at install time only.** Upstream calls
+  `snapshot_download` even when the weights are already on disk; the runner
+  points that call back at the local copy, because unauthenticated hub
+  downloads were seen stalling at zero bytes on this machine.
 - **Background removal is not optional.** With a 3-channel image, upstream's
   `ImageProcessorV2.recenter()` sets the entire mask to 255, so the subject is
   never cropped. `rembg=False` means "I already removed the background", not

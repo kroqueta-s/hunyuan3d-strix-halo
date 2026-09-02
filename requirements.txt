@@ -26,3 +26,6 @@ python-dotenv==1.2.3
 # whole mask to 255 for a 3-channel image, so the subject is never cropped.
 rembg==2.0.81
 onnxruntime==1.29.0
+
+# The texture stage needs more (and needs `--no-deps`); see
+# requirements-texture.txt, installed by `install.ps1 -Texture`.

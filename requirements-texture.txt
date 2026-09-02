@@ -1,0 +1,29 @@
+# Texture stage (hy3dpaint) only. Needed for `texture_mesh`, and for
+# `image_to_mesh` with `texture: true`. The shape stage does not use any of it.
+#
+# **Install this file with `--no-deps`.** basicsr and realesrgan pin an old
+# `torch` and a `basicsr`-flavoured `opencv`; resolving them would replace the
+# ROCm PyTorch with a CPU build and the generator would silently stop using the
+# GPU. `install.ps1 -Texture` does this for you.
+#
+# Versions are the ones this was verified with on 2026-09-02.
+
+# UV unwrapping before the texture is baked.
+xatlas==0.0.11
+
+# Upstream upscales every 512 px view 4x before baking a 4096 px texture.
+# It reaches RealESRGAN through basicsr's RRDBNet.
+basicsr==1.4.2
+realesrgan==0.3.0
+
+# basicsr's own imports, which `--no-deps` would otherwise skip.
+addict==2.4.0
+future==1.0.0
+lmdb==2.3.0
+yapf==0.43.0
+
+# The multi-view UNet subclasses pl.LightningModule. Only the base class is used
+# at inference, but upstream imports the real thing, so install the real thing.
+pytorch-lightning==2.5.6
+torchmetrics==1.8.2
+lightning-utilities==0.15.3

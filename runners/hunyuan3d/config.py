@@ -81,3 +81,24 @@ FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
 # works as before if it fails to start; `metrics.gfx_keepalive` records whether
 # it was alive.
 GFX_KEEPALIVE: bool = _bool("HUNYUAN3D_GFX_KEEPALIVE", True)
+
+
+# --- Texture stage (hy3dpaint) -----------------------------------------------
+# It needs its own weights (hunyuan3d-paintpbr-v2-1, about 6.4 GB) on top of the
+# shape stage. **The CUDA-only `custom_rasterizer` is replaced by the pure-torch
+# `raster.py`**, so nothing has to be built.
+TEXTURE_MAX_VIEWS: int = _int("HUNYUAN3D_TEXTURE_MAX_VIEWS", 6)
+TEXTURE_VIEW_RESOLUTION: int = _int("HUNYUAN3D_TEXTURE_VIEW_RESOLUTION", 512)
+# Upstream defaults: 2048 for rendering and 4096 for the texture. Both cost
+# VRAM and time, so they are settings rather than constants.
+TEXTURE_RENDER_SIZE: int = _int("HUNYUAN3D_TEXTURE_RENDER_SIZE", 2048)
+TEXTURE_SIZE: int = _int("HUNYUAN3D_TEXTURE_SIZE", 4096)
+
+# DINOv2 features condition the multi-view diffusion. **It is not optional**:
+# upstream hardcodes `use_dino = True`. Its weights (about 4.5 GB) live beside
+# the Hunyuan ones, so nothing is fetched at generation time.
+TEXTURE_DINO_DIR: Path = Path(
+    _str("HUNYUAN3D_TEXTURE_DINO_DIR", str(SHAPE_MODELS_DIR / "facebook" / "dinov2-giant"))
+)
+# Sub-directory of the weights repository holding the texture stage.
+TEXTURE_SUBFOLDER: str = _str("HUNYUAN3D_TEXTURE_SUBFOLDER", "hunyuan3d-paintpbr-v2-1")

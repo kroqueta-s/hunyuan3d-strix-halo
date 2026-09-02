@@ -82,9 +82,11 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             # There is no direct text-to-3D path; the image comes from elsewhere.
             "text_to_mesh": False,
             "multi_image_to_mesh": False,
-            # **The texture stage is unverified.** It may depend on CUDA, with no
-            # guarantee of working on gfx1151.
-            "texture": False,
+            # The texture stage runs here: its CUDA-only `custom_rasterizer` is
+            # replaced by the pure-torch one in `raster.py`.
+            "texture": True,
+            # Texture an existing mesh from a reference image.
+            "texture_mesh": True,
         },
         "params": {
             "steps": {"type": "int", "default": 30, "min": 1, "max": 200},
@@ -92,6 +94,7 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "guidance_scale": {"type": "float", "default": 5.0, "min": 0.0, "max": 20.0},
             "seed": {"type": "int", "default": 0, "min": 0},
             "rembg": {"type": "bool", "default": True},
+            "texture": {"type": "bool", "default": False},
         },
         "notes": (
             "On gfx1151, SDPA falls back to fp32 over 4 chunked heads when fast attention "
@@ -114,17 +117,83 @@ def m_load(params: dict[str, Any], progress: Any) -> dict[str, Any]:
 
 
 def m_unload(params: dict[str, Any], progress: Any) -> dict[str, Any]:
-    """Release the weights and give the VRAM back."""
-    from . import shape
+    """Release the weights and give the VRAM back.
+
+    **Both stages are released.** The texture stage keeps its own weights
+    resident once used, and hearth expects `unload` to hand the whole GPU back.
+    """
+    from . import shape, texture
 
     freed = shape.unload_pipeline()
+    freed_texture = texture.unload_pipeline()
     used_gb, _ = shape.device_memory_gb()
-    return {"unloaded": freed, "vram_used_gb": round(used_gb, 2)}
+    return {
+        "unloaded": freed or freed_texture,
+        "vram_used_gb": round(used_gb, 2),
+    }
 
 
 _ALLOWED = frozenset(
-    {"steps", "octree_resolution", "guidance_scale", "seed", "rembg", "rembg_model"}
+    {"steps", "octree_resolution", "guidance_scale", "seed", "rembg", "rembg_model", "texture"}
 )
+
+
+def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
+    """Texture an existing mesh from a reference image.
+
+    The mesh can come from anywhere: this runner's own output, another
+    generator, or a hand-made model.
+
+    **The geometry does change.** Upstream decimates to 40,000 faces before
+    unwrapping UVs, so a dense input comes back much lighter. `n_faces` in the
+    result says what came out; keep the original if you need the detail.
+    """
+    from . import background, shape, texture
+
+    # **The shape stage is not needed here.** hearth loads a runner before
+    # calling it, so its weights are resident; they would just crowd the texture
+    # stage out of the 32 GB of dedicated VRAM.
+    if shape.is_loaded():
+        progress("unload_shape", "releasing the shape weights (texturing does not need them)")
+        shape.unload_pipeline()
+
+    mesh_path = Path(str(params["mesh_path"]))
+    image_path = Path(str(params["image_path"]))
+    out_dir = Path(str(params["out_dir"]))
+    if not mesh_path.is_file():
+        raise FileNotFoundError(f"mesh not found: {mesh_path}")
+    if not image_path.is_file():
+        raise FileNotFoundError(f"input image not found: {image_path}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # The reference image wants its background gone, for the same reason the
+    # shape stage does: the model otherwise paints the backdrop onto the object.
+    use_rembg = bool(params.get("rembg", True))
+    if use_rembg:
+        progress("rembg", "removing the background from the reference image")
+        foreground, _ = background.prepare_image(image_path, rembg=True)
+        image_path = out_dir / "texture_reference.png"
+        foreground.save(image_path)
+
+    result = texture.texture_mesh(
+        mesh_path,
+        image_path,
+        out_dir,
+        # GLB is off by default: upstream converts with bpy (GPL), which this
+        # repository does not install.
+        save_glb=bool(params.get("save_glb", False)),
+        progress=progress,
+    )
+    return {
+        "mesh_path": str(result.mesh_path),
+        "source_mesh": str(params["mesh_path"]),
+        "input_image": str(image_path),
+        "n_faces": result.n_faces,
+        "metrics": {
+            "load_sec": round(result.load_sec, 2),
+            "texture_sec": round(result.texture_sec, 2),
+        },
+    }
 
 
 def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
@@ -170,8 +239,32 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
     mesh_path = out_dir / "raw.ply"
     result.mesh.export(str(mesh_path))
 
+    # **The texture stage is opt-in**: it costs several more minutes and its own
+    # weights, and downstream printing does not need it.
+    textured_path: str | None = None
+    texture_metrics: dict[str, Any] = {}
+    if params.get("texture"):
+        from . import texture as texture_stage
+
+        # The shape stage keeps its weights resident; the texture stage needs
+        # the VRAM, and only one of them fits at a time.
+        progress("unload_shape", "releasing the shape weights before texturing")
+        shape.unload_pipeline()
+        textured = texture_stage.texture_mesh(
+            mesh_path, foreground_path, out_dir, progress=progress
+        )
+        textured_path = str(textured.mesh_path)
+        texture_metrics = {
+            "texture_load_sec": round(textured.load_sec, 2),
+            "texture_sec": round(textured.texture_sec, 2),
+            # **The textured mesh is much lighter than raw.ply**: upstream
+            # decimates to 40,000 faces before unwrapping UVs.
+            "textured_n_faces": textured.n_faces,
+        }
+
     return {
         "mesh_path": str(mesh_path),
+        "textured_mesh_path": textured_path,
         "n_vertices": int(len(result.mesh.vertices)),
         "n_faces": int(len(result.mesh.faces)),
         "extra": {
@@ -187,6 +280,7 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             # **Whether fast attention is in effect.** Without it generation is
             # several times slower.
             "fast_attention": result.fast_attention,
+            **texture_metrics,
         },
         "params": {
             "steps": result.steps,
@@ -202,6 +296,7 @@ METHODS = {
     "load": m_load,
     "unload": m_unload,
     "image_to_mesh": m_image_to_mesh,
+    "texture_mesh": m_texture_mesh,
 }
 
 

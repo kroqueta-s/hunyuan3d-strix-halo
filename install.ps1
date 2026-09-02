@@ -25,7 +25,11 @@ param(
     # Where the virtual environment, the upstream clone and the weights go.
     # Empty means: next to this repository, in hunyuan3d-strix-halo-data.
     [string]$Root = "",
-    [string]$Python = "py -3.12"
+    [string]$Python = "py -3.12",
+    # Also install the texture stage: `texture_mesh`, and `image_to_mesh` with
+    # `texture: true`. It costs about 11 GB more in weights and a few more
+    # packages, so it is opt-in.
+    [switch]$Texture
 )
 
 # Native tools (git, pip) report progress on stderr. Under output redirection,
@@ -50,6 +54,10 @@ $TorchvisionVersion = "0.24.1+rocm7.2.1"
 $UpstreamUrl = "https://github.com/Tencent-Hunyuan/Hunyuan3D-2.1.git"
 $UpstreamCommit = "82920d643c0dc2f7bfd7255f45f62d386edfe60c"
 $WeightsRepo = "tencent/Hunyuan3D-2.1"
+# The texture stage conditions its multi-view diffusion on DINOv2 features, and
+# upscales each view with RealESRGAN. Neither is optional in upstream's code.
+$DinoRepo = "facebook/dinov2-giant"
+$RealEsrganUrl = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth"
 
 $venv = Join-Path $Root ".venv"
 $upstream = Join-Path $Root "Hunyuan3D-2.1"
@@ -98,6 +106,15 @@ Write-Host "==> Installing dependencies"
 & $py -m pip install --no-cache-dir -r (Join-Path $repo "requirements.txt")
 Assert-Ok "dependency installation"
 
+if ($Texture) {
+    # **--no-deps is required, not an optimisation.** basicsr and realesrgan pin
+    # an old torch; resolving their dependencies would replace the ROCm build
+    # with a CPU one and generation would quietly fall off the GPU.
+    Write-Host "==> Installing texture-stage dependencies"
+    & $py -m pip install --no-cache-dir --no-deps -r (Join-Path $repo "requirements-texture.txt")
+    Assert-Ok "texture dependency installation"
+}
+
 # 5. Weights ------------------------------------------------------------------
 # Upstream resolves weights as HY3DGEN_MODELS/<model id>/<subfolder>, so the
 # files must land under weights\tencent\Hunyuan3D-2.1. Only the shape stage is
@@ -106,6 +123,24 @@ Write-Host "==> Downloading weights (shape stage only, about 7.5 GB)"
 $weightsDir = Join-Path $weights $WeightsRepo.Replace("/", "\")
 & $py -c "from huggingface_hub import snapshot_download; snapshot_download('$WeightsRepo', local_dir=r'$weightsDir', allow_patterns=['hunyuan3d-dit-v2-1/*', 'hunyuan3d-vae-v2-1/*', 'LICENSE', 'Notice.txt'])"
 Assert-Ok "weights download"
+
+if ($Texture) {
+    Write-Host "==> Downloading texture-stage weights (about 11 GB)"
+    & $py -c "from huggingface_hub import snapshot_download; snapshot_download('$WeightsRepo', local_dir=r'$weightsDir', allow_patterns=['hunyuan3d-paintpbr-v2-1/*'])"
+    Assert-Ok "texture weights download"
+
+    # DINOv2 conditions the multi-view diffusion; upstream hardcodes use_dino.
+    $dinoDir = Join-Path $weights $DinoRepo.Replace("/", "\")
+    & $py -c "from huggingface_hub import snapshot_download; snapshot_download('$DinoRepo', local_dir=r'$dinoDir', allow_patterns=['*.json', '*.safetensors'])"
+    Assert-Ok "DINOv2 download"
+
+    # Upstream opens this one by a relative path from its own directory, so it
+    # has to sit inside the clone rather than beside the other weights.
+    $ckpt = Join-Path $upstream "ckpt"
+    New-Item -ItemType Directory -Force -Path $ckpt | Out-Null
+    $ProgressPreference = "SilentlyContinue"
+    Invoke-WebRequest -Uri $RealEsrganUrl -OutFile (Join-Path $ckpt "RealESRGAN_x4plus.pth") -UseBasicParsing
+}
 
 # 6. .env ---------------------------------------------------------------------
 $envPath = Join-Path $repo ".env"

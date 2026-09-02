@@ -4,13 +4,18 @@ on: [push, pull_request]
 
 jobs:
   sanity:
-    # This runner has no numerical shim test: its only shim swaps the SDPA
-    # implementation, which is exercised implicitly by every generation.
-    # CI checks that everything at least parses and imports cleanly.
+    # Everything must parse, and the one stand-in that can be checked without a
+    # GPU is actually run. The SDPA stand-in is exercised implicitly by every
+    # generation, and the rasterizer stand-in needs torch, so both are verified
+    # on the machine instead (tests/test_raster.py).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m compileall runners tools
+      - run: python -m compileall runners tools tests
+      - run: pip install numpy
+      # The UV hole-filler replaces a C++ extension, so its behaviour is pinned
+      # here. It needs numpy and nothing else.
+      - run: python tests/test_inpaint.py
