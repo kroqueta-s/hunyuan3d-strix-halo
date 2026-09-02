@@ -173,6 +173,14 @@ not trade quality for speed here.
 against 220 s afterwards. That is MIOpen tuning kernels once per machine, the
 same one-time cost the shape stage pays. Time the second run, not the first.
 
+A profile of where the shape stage's GPU time goes (GEMM shapes, attention) is
+in [`docs/gemm_profile.md`](docs/gemm_profile.md), taken with
+[`tools/profile_gemm.py`](tools/profile_gemm.py). Everything about this GPU
+that does not depend on the model — GEMM baselines, the 600 MHz clock
+behaviour, BLAS backend switches — lives in
+[gfx1151-gemm](https://github.com/kroqueta-s/gfx1151-gemm), shared by all
+three runners in this family.
+
 ## Troubleshooting
 
 - **Out of VRAM.** The runner caps torch at `HUNYUAN3D_VRAM_LIMIT_GB` (default
