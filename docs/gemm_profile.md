@@ -44,11 +44,13 @@ move). `metrics.blas_backend` records which backend a run used.
 
 ## After the ROCm 10.0 update (torch 2.13.0+rocm10.0.0)
 
-Second-run shape wall, same sample and settings, 2026-09-02: **73.2 s**
-(1.13× over the 7.2.1 baseline). Reference GEMM alongside: 30.4 / 30.8 TFLOPS
-at 2048³ / 4096³ — this pipeline's fat shapes were already near the library
-ceiling, so the update moves it least of the three runners. The install traps
-and the full measurement set are in gfx1151-gemm's `docs/rocm10.md`.
+Same sample and settings, 2026-09-03, **median of 5 fresh-process runs**
+(each bracketed by a 4096³ reference GEMM, all within 29.7–31.0 TFLOPS, GPU
+clock traced throughout): shape **73.1 s** (range 73.0–73.3), 1.13× over the
+single 7.2.1 measurement of 82.6 s. This pipeline's fat shapes were already
+near the library ceiling, so the update moves it least of the three runners.
+The install traps and the full measurement set are in gfx1151-gemm's
+`docs/rocm10.md`.
 
 The three-pipeline comparison, the shape-overlap analysis, and everything
 about this GPU that does not depend on the model live in

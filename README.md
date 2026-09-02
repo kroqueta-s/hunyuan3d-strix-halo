@@ -144,16 +144,18 @@ CI runs the second one; the first needs a GPU and runs here.
 ## Measurements (gfx1151, Radeon 8060S, 32 GB dedicated VRAM)
 
 One image (`assets/sample.png`), flash attention on, torch 2.13.0+rocm10.0.0
-(the pins in `install.ps1`), 2026-09-02:
+(the pins in `install.ps1`). The shape row is the **median of 5 runs** (each
+a fresh process, reference GEMM and GPU clock recorded alongside every run),
+2026-09-03:
 
 | Stage | Load | Run | Peak VRAM | Output |
 |---|--:|--:|--:|---|
-| Shape, `steps=30`, `octree=384` (default) | 25 s | **73 s** | 11.3 GB | 1,225,828 faces, watertight |
+| Shape, `steps=30`, `octree=384` (default) | 23 s | **73.1 s** (range 73.0–73.3) | 15.3 GB | 1,225,828 faces, watertight |
 | Texture, 6 views at 512 px, 4096 px texture | 44 s | **220 s** | 24.6 GB | 40,000 faces, albedo + metallic + roughness |
 
-The texture row is from the previous wheel stack (torch 2.9.1+rocm7.2.1),
-where the shape stage ran 86 s; the GEMM breakdown and the update history are
-in [`docs/gemm_profile.md`](docs/gemm_profile.md).
+The texture row is a single measurement from the previous wheel stack
+(torch 2.9.1+rocm7.2.1), where the shape stage ran 86 s; the GEMM breakdown
+and the update history are in [`docs/gemm_profile.md`](docs/gemm_profile.md).
 
 Lowering `octree_resolution` opens holes (low-resolution marching cubes); do
 not trade quality for speed here.
