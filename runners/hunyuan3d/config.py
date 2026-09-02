@@ -84,11 +84,11 @@ FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
 # `metrics.blas_backend`.
 PREFER_HIPBLASLT: bool = _bool("HUNYUAN3D_PREFER_HIPBLASLT", True)
 
-# Whether to run the clock keepalive during generation (`gfxlight.py`). The AMD
-# Windows driver does not raise the clock for compute-only work (measured: GEMM
-# alone 600 MHz, with 3D alongside 2.35 GHz, a 4.3x difference). Generation
-# works as before if it fails to start; `metrics.gfx_keepalive` records whether
-# it was alive.
+# Whether to run the render-loop keepalive during generation (`gfxlight.py`).
+# Re-measured 2026-09-03: no effect on this machine (the GPU reaches full
+# clock for compute alone), kept because it costs nothing and driver power
+# management is outside this runner's control. Generation works as before if
+# it fails to start; `metrics.gfx_keepalive` records whether it was alive.
 GFX_KEEPALIVE: bool = _bool("HUNYUAN3D_GFX_KEEPALIVE", True)
 
 

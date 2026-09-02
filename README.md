@@ -141,26 +141,10 @@ Two stand-ins replace compiled extensions, so both are pinned by tests:
 
 CI runs the second one; the first needs a GPU and runs here.
 
-## The GPU idles at 600 MHz unless something renders
-
-The AMD Windows driver does not raise the GPU power state for compute-only
-work: at 99 % compute utilisation the clock sits at **600 MHz** (measured,
-2026-09-01). With any 3D rendering alive alongside, the same workload sustains
-**2.3–2.9 GHz** — a 4.3× difference on GEMM throughput. This is why generation
-time on this machine used to vary between 235 s and 921 s for identical
-settings: it depended on whether some UI happened to be animating on the
-desktop.
-
-The runner therefore keeps a **hidden 3D render loop** (`gfxlight.py`, pure
-ctypes, ~0.4 % of the 3D engine) alive during `image_to_mesh`. It is on by
-default (`HUNYUAN3D_GFX_KEEPALIVE`), costs nothing measurable, and whether it
-was alive is reported in `metrics.gfx_keepalive`. Measured on the same image:
-179 s without it, **86 s** with it.
-
 ## Measurements (gfx1151, Radeon 8060S, 32 GB dedicated VRAM)
 
-One image (`assets/sample.png`), clock keepalive on, flash attention on,
-torch 2.13.0+rocm10.0.0 (the pins in `install.ps1`), 2026-09-02:
+One image (`assets/sample.png`), flash attention on, torch 2.13.0+rocm10.0.0
+(the pins in `install.ps1`), 2026-09-02:
 
 | Stage | Load | Run | Peak VRAM | Output |
 |---|--:|--:|--:|---|
@@ -181,8 +165,8 @@ same one-time cost the shape stage pays. Time the second run, not the first.
 A profile of where the shape stage's GPU time goes (GEMM shapes, attention) is
 in [`docs/gemm_profile.md`](docs/gemm_profile.md), taken with
 [`tools/profile_gemm.py`](tools/profile_gemm.py). Everything about this GPU
-that does not depend on the model — GEMM baselines, the 600 MHz clock
-behaviour, BLAS backend switches — lives in
+that does not depend on the model — GEMM baselines, clock behaviour, BLAS
+backend switches — lives in
 [gfx1151-gemm](https://github.com/kroqueta-s/gfx1151-gemm), shared by all
 three runners in this family.
 
