@@ -75,6 +75,15 @@ HEARTBEAT_SEC: float = _float("HUNYUAN3D_HEARTBEAT_SEC", 10.0)
 # effect**, so it goes at the top of `__main__.py`.
 FAST_ATTENTION: bool = _bool("HUNYUAN3D_FAST_ATTENTION", True)
 
+# Whether to set TORCH_BLAS_PREFER_HIPBLASLT and ROCBLAS_USE_HIPBLASLT **before
+# torch is imported**. Measured 2026-09-02 on gfx1151 (ROCm 7.2.1): the DiT's
+# unbiased projections run ~24% faster under hipBLASLt (21.7 to 26.9 TFLOPS)
+# while its biased ones stay on rocBLAS-level throughput; one shape generation
+# went from 82.6 s to 80.4 s, within this machine's variance but consistently
+# in hipBLASLt's favour. Which backend was in effect is recorded in
+# `metrics.blas_backend`.
+PREFER_HIPBLASLT: bool = _bool("HUNYUAN3D_PREFER_HIPBLASLT", True)
+
 # Whether to run the clock keepalive during generation (`gfxlight.py`). The AMD
 # Windows driver does not raise the clock for compute-only work (measured: GEMM
 # alone 600 MHz, with 3D alongside 2.35 GHz, a 4.3x difference). Generation

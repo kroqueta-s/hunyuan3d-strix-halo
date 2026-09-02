@@ -33,6 +33,15 @@ loaded in fp16; the profiler's dispatch recorder does not see inside
 rocBLAS already runs these at 21–27 TFLOPS; the headroom to a hand-tuned WMMA
 kernel (41–46 TFLOPS at 4096³ on Linux) is roughly 1.7×.
 
+## With hipBLASLt (now the default)
+
+Same measurement with `TORCH_BLAS_PREFER_HIPBLASLT=1` and
+`ROCBLAS_USE_HIPBLASLT=1` (what `HUNYUAN3D_PREFER_HIPBLASLT=on` sets): the
+shape stage went 82.6 s → 80.4 s — within this machine's variance, but the
+per-shape numbers move consistently in hipBLASLt's favour (the unbiased
+`mm` projections improved 21.7 → 26.9 TFLOPS; the biased `addmm` rows did not
+move). `metrics.blas_backend` records which backend a run used.
+
 The three-pipeline comparison, the shape-overlap analysis, and everything
 about this GPU that does not depend on the model live in
 [gfx1151-gemm](https://github.com/kroqueta-s/gfx1151-gemm).

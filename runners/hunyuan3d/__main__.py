@@ -31,6 +31,13 @@ from . import config, gfxlight
 if config.FAST_ATTENTION:
     os.environ.setdefault("TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL", "1")
 
+# Same rule: **only effective before torch is imported.** hipBLASLt runs the
+# DiT's unbiased projections ~24% faster than rocBLAS (measured 2026-09-02,
+# see docs/gemm_profile.md). `metrics.blas_backend` records what was used.
+if config.PREFER_HIPBLASLT:
+    os.environ.setdefault("TORCH_BLAS_PREFER_HIPBLASLT", "1")
+    os.environ.setdefault("ROCBLAS_USE_HIPBLASLT", "1")
+
 NAME = "hunyuan3d"
 VERSION = "2.1"
 
@@ -280,6 +287,9 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             # **Whether fast attention is in effect.** Without it generation is
             # several times slower.
             "fast_attention": result.fast_attention,
+            # **Which BLAS backend served the GEMMs.** Timings cannot be
+            # compared without knowing which one produced them.
+            "blas_backend": shape.blas_backend(),
             **texture_metrics,
         },
         "params": {
