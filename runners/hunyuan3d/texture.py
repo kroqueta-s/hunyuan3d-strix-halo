@@ -151,6 +151,9 @@ def _install_local_snapshot() -> None:
     import huggingface_hub
 
     original = huggingface_hub.snapshot_download
+    # An unload followed by a reload would otherwise wrap the wrapper.
+    if getattr(original, "_hearth_local", False):
+        return
 
     def snapshot_download(*args: Any, **kwargs: Any) -> str:
         repo_id = kwargs.get("repo_id") or (args[0] if args else None)
@@ -158,6 +161,7 @@ def _install_local_snapshot() -> None:
             return str(local)
         return original(*args, **kwargs)
 
+    snapshot_download._hearth_local = True  # type: ignore[attr-defined]
     huggingface_hub.snapshot_download = snapshot_download
 
 
