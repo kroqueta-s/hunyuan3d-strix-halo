@@ -31,12 +31,13 @@ The runner speaks one JSON object per line over stdin/stdout, so any
 orchestrator can drive it as a child process. It also runs standalone (see
 Quickstart).
 
-| Input image | Mesh (4 views) |
-|---|---|
-| ![input](assets/sample.png) | ![mesh](assets/preview.png) |
+| Input image | Mesh (4 views) | Textured (4 views) |
+|---|---|---|
+| ![input](assets/sample.png) | ![mesh](assets/preview.png) | ![textured](assets/preview_textured.png) |
 
 *The bundled [`assets/sample.png`](assets/sample.png) (an SDXL-generated robot)
-is the reference specimen for the measurements below.*
+is the reference specimen for the measurements below. Both renders come from
+this repository's own rasterizer, so they are also a check on it.*
 
 ## Prerequisites
 
