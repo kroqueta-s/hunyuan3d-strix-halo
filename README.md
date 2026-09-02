@@ -28,8 +28,10 @@ compiled**. The rest of what it takes is listed in
 [`texture.py`](runners/hunyuan3d/texture.py).
 
 The runner speaks one JSON object per line over stdin/stdout, so any
-orchestrator can drive it as a child process. It also runs standalone (see
-Quickstart).
+orchestrator can drive it as a child process —
+[hearth](https://github.com/kroqueta-s/hearth) is one, built to hold this
+runner and its siblings behind a single interface, one loaded at a time. It
+also runs standalone (see Quickstart).
 
 | Input image | Mesh (4 views) | Textured (4 views) |
 |---|---|---|
@@ -185,7 +187,8 @@ three runners in this family.
   ([details](https://github.com/kroqueta-s/gfx1151-gemm/blob/main/docs/displayoff.md)).
   Either keep the display from sleeping in Windows power settings, or set
   `HUNYUAN3D_DISPLAY_KEEPALIVE`=on to hold it awake during generation
-  (off by default because it keeps the panel lit).- **The first run looks hung.** It is not. MIOpen tunes kernels once per
+  (off by default because it keeps the panel lit).
+- **The first run looks hung.** It is not. MIOpen tunes kernels once per
   machine, with the GPU busy the whole time. Do not kill it; every later run
   reuses the tuned kernels. The runner emits a `heartbeat` line every 10 s —
   as long as those keep coming, it is working.
