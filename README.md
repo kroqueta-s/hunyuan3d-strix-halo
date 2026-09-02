@@ -45,7 +45,8 @@ this repository's own rasterizer, so they are also a check on it.*
 - Git
 - An AMD GPU supported by ROCm on Windows (verified on **Strix Halo / gfx1151**,
   Radeon 8060S)
-- AMD Adrenalin driver with **ROCm 7.2.1** support
+- A current AMD Adrenalin driver (verified with the 2026-08 driver; the
+  **ROCm 10.0 runtime itself ships inside the wheels** that install.ps1 pins)
 - **Python 3.12**
 - ~20 GB of disk (venv + upstream clone + weights), ~31 GB with the texture stage
 - ~15 GB of free VRAM at peak (~25 GB with the texture stage)
@@ -159,12 +160,16 @@ was alive is reported in `metrics.gfx_keepalive`. Measured on the same image:
 ## Measurements (gfx1151, Radeon 8060S, 32 GB dedicated VRAM)
 
 One image (`assets/sample.png`), clock keepalive on, flash attention on,
-2026-09-02:
+torch 2.13.0+rocm10.0.0 (the pins in `install.ps1`), 2026-09-02:
 
 | Stage | Load | Run | Peak VRAM | Output |
 |---|--:|--:|--:|---|
-| Shape, `steps=30`, `octree=384` (default) | 32 s | **86 s** | 11.3 GB | 1,227,315 faces, watertight |
+| Shape, `steps=30`, `octree=384` (default) | 25 s | **73 s** | 11.3 GB | 1,225,828 faces, watertight |
 | Texture, 6 views at 512 px, 4096 px texture | 44 s | **220 s** | 24.6 GB | 40,000 faces, albedo + metallic + roughness |
+
+The texture row is from the previous wheel stack (torch 2.9.1+rocm7.2.1),
+where the shape stage ran 86 s; the GEMM breakdown and the update history are
+in [`docs/gemm_profile.md`](docs/gemm_profile.md).
 
 Lowering `octree_resolution` opens holes (low-resolution marching cubes); do
 not trade quality for speed here.
