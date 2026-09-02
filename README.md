@@ -146,7 +146,7 @@ CI runs the second one; the first needs a GPU and runs here.
 One image (`assets/sample.png`), flash attention on, torch 2.13.0+rocm10.0.0
 (the pins in `install.ps1`). The shape row is the **median of 5 runs** (each
 a fresh process, reference GEMM and GPU clock recorded alongside every run),
-2026-09-03:
+2026-09-02:
 
 | Stage | Load | Run | Peak VRAM | Output |
 |---|--:|--:|--:|---|

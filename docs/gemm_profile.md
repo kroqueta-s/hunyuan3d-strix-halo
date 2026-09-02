@@ -45,7 +45,7 @@ move). `metrics.blas_backend` records which backend a run used.
 
 ## After the ROCm 10.0 update (torch 2.13.0+rocm10.0.0)
 
-Same sample and settings, 2026-09-03, **median of 5 fresh-process runs**
+Same sample and settings, 2026-09-02, **median of 5 fresh-process runs**
 (each bracketed by a 4096³ reference GEMM, all within 29.7–31.0 TFLOPS, GPU
 clock traced throughout): shape **73.1 s** (range 73.0–73.3), 1.13× over the
 single 7.2.1 measurement of 82.6 s. This pipeline's fat shapes were already
