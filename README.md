@@ -141,7 +141,7 @@ Two stand-ins replace compiled extensions, so both are pinned by tests:
 
 CI runs the second one; the first needs a GPU and runs here.
 
-## Measurements (gfx1151, Radeon 8060S, 32 GB dedicated VRAM)
+## Measurements (ASUS ProArt PX13: Ryzen AI MAX+ 395, Radeon 8060S / gfx1151, 32 GB dedicated VRAM, factory power limits)
 
 One image (`assets/sample.png`), flash attention on, torch 2.13.0+rocm10.0.0
 (the pins in `install.ps1`). The shape row is the **median of 5 runs** (each
