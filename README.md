@@ -196,12 +196,23 @@ three runners in this family.
 
 ## Limits
 
-- **Which way is up has never been measured here**, so the result reports
-  `up_axis: null` rather than a guess. A mesh imported on the wrong axis renders
-  perfectly correctly, so the mistake is not one anybody finds by looking: the
-  first sign is a mirrored joint on a printed part. A caller should say the
-  orientation is assumed rather than known. Measuring it and reporting `"z"`
-  is a small job that nobody has done.
+- **The mesh comes back Y-up, and that was measured** (2026-09-03), not
+  assumed - it is also not what anyone guessed. A caller that takes it as Z-up
+  gets a model lying on its back, which renders perfectly correctly and prints
+  with every joint in the wrong plane. The method: turn the mesh every way a
+  right-handed frame allows and compare its silhouette to the image it was
+  generated from. `up: y` won by 0.29 IoU over the best candidate that disagreed,
+  and a runner that reports `z` on its own say-so measured `z` by the same
+  method, as a control.
+- **Which way is forward is still unknown.** The specimen is nearly symmetric
+  front to back, so the two candidates were 0.01 IoU apart, which is not a
+  measurement. `forward_axis` is `null`; a caller should stand the mesh upright
+  and leave its facing alone.
+- **The texture stage keeps the frame and the size it is given** (measured on
+  the same day: a bake returned its input's bounding box to within 0.07 %, axes
+  in the same order, 2,508 seconds, 40,000 faces out of 1,227,315). It takes a
+  mesh from anywhere, so its result reports `up_axis: null` - it does not know
+  what it was handed, and the caller does.
 - **The texture stage rewrites the geometry.** Upstream decimates to 40,000
   faces before unwrapping UVs, and that is upstream's design, not a setting.
   Keep `raw.ply` when the detail matters.
