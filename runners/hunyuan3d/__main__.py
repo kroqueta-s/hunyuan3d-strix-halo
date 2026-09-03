@@ -114,6 +114,12 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "guidance_scale": {"type": "float", "default": 5.0, "min": 0.0, "max": 20.0},
             "seed": {"type": "int", "default": 0, "min": 0},
             "rembg": {"type": "bool", "default": True},
+            # **Accepted, so declared** (contract §3). It was read by
+            # `image_to_mesh` and left out of this table, which is the same
+            # mistake as declaring one that does nothing, pointing the other
+            # way: a caller had no way to know it existed. Empty means the
+            # `.env` default.
+            "rembg_model": {"type": "str", "default": ""},
             "texture": {"type": "bool", "default": False},
         },
         "notes": (
