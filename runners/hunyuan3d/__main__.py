@@ -128,8 +128,9 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "(ImageProcessorV2.recenter does nothing useful on a 3-channel image). "
             "Generation time varies between 235 and 921 seconds for identical settings, "
             "so never use it as a pass/fail signal. "
-            "The output axes are unmeasured, so up_axis and forward_axis are reported "
-            "as null rather than guessed."
+            "The mesh comes back Y-up (measured 2026-09-03 against the image it was "
+            "generated from), at the scale of the input. Which way is forward has not "
+            "been measured, so forward_axis is null rather than guessed."
         ),
     }
 
@@ -234,8 +235,12 @@ def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         "source_mesh": str(params["mesh_path"]),
         "input_image": str(image_path),
         "n_faces": result.n_faces,
-        # **The geometry is rewritten here**, so the mesh that comes back is not
-        # the one that went in and its axes are upstream's, unmeasured as above.
+        # **This stage keeps the frame it is given** (measured 2026-09-03: a bake
+        # returned its input's bounding box to within 0.07 %, axes in the same
+        # order). But it takes a mesh from anywhere - that is the point of it
+        # being a separate method - so **this runner does not know what that
+        # frame was** and will not invent one. The caller has it: whatever the
+        # mesh going in was reported as, the mesh coming out is the same.
         "up_axis": None,
         "forward_axis": None,
         "params_used": {
@@ -343,13 +348,20 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "blas_backend": shape.blas_backend(),
             **texture_metrics,
         },
-        # **Not measured, so not claimed** (contract §5). Upstream normalizes
-        # the input and restores the scale afterwards, but which way is up has
-        # never been checked against a mesh made here - and a mesh imported on
-        # the wrong axis renders perfectly correctly, so nobody would find out by
-        # looking. `null` travels downstream and the caller says "assumed,
-        # unverified" instead of saying nothing.
-        "up_axis": None,
+        # **Measured on 2026-09-03, and it is not what anyone would have
+        # guessed.** Upstream returns a Y-up mesh: a generated model taken as
+        # Z-up arrives lying on its back, which renders perfectly correctly and
+        # prints with every joint in the wrong plane. The method was to turn the
+        # mesh every way a right-handed frame allows and compare its silhouette
+        # to the very image it was generated from; `up: y` won by 0.29 IoU over
+        # the best candidate that disagreed, and hi3dgen - which reports `z` on
+        # its own say-so - measured `z` by the same method, as a control.
+        #
+        # **Which way is forward is still not known.** The object is nearly
+        # symmetric front to back, so the two candidates were separated by 0.01
+        # IoU, which is not a measurement. `null` says so; a caller stands the
+        # mesh upright and leaves the facing alone.
+        "up_axis": "y",
         "forward_axis": None,
         "params_used": {
             "steps": result.steps,
