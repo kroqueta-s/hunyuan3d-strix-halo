@@ -105,7 +105,6 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         "method_params": {
             "texture_mesh": {
                 "rembg": {"type": "bool", "default": True},
-                "rembg_model": {"type": "str", "default": ""},
                 "save_glb": {"type": "bool", "default": False},
             },
         },
@@ -165,7 +164,7 @@ _ALLOWED = frozenset(
 # `octree_resolution` mean nothing to it. They used to be accepted and silently
 # dropped, which is worse than refusing them: a caller could change a setting,
 # see no error, and get the same result.
-_ALLOWED_TEXTURE = frozenset({"rembg", "rembg_model", "save_glb"})
+_ALLOWED_TEXTURE = frozenset({"rembg", "save_glb"})
 
 
 def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
@@ -235,7 +234,6 @@ def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         "forward_axis": None,
         "params_used": {
             "rembg": bool(params.get("rembg", True)),
-            "rembg_model": str(params.get("rembg_model", "")),
             "save_glb": bool(params.get("save_glb", False)),
         },
         "metrics": {
