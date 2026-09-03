@@ -408,12 +408,23 @@ def texture_mesh(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pipeline = load_pipeline(progress)
-    output = out_dir / "textured.obj"
+    # **A texture is several files, and they refer to each other.** Upstream
+    # writes `textured.obj` with `mtllib textured.mtl` inside it and the images
+    # beside it, so renaming only the mesh - the usual way of not leaving a
+    # half-written file about (contract §9) - would leave that reference
+    # pointing at nothing. The whole set is written into a staging directory and
+    # **the directory** is renamed when it is complete.
+    final_dir = out_dir / "textured"
+    staging_dir = out_dir / "_textured.part"
+    if staging_dir.exists():
+        shutil.rmtree(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    output = staging_dir / "textured.obj"
 
     # **Upstream writes its remesh next to the input mesh**
     # (`white_mesh_remesh.obj`). Copy the input into the output directory first,
     # so texturing someone's own mesh does not litter their directory.
-    staged = out_dir / f"input{mesh_path.suffix}"
+    staged = staging_dir / f"input{mesh_path.suffix}"
     if staged.resolve() != mesh_path.resolve():
         shutil.copyfile(mesh_path, staged)
 
@@ -455,8 +466,14 @@ def texture_mesh(
     import trimesh
 
     baked = trimesh.load(str(output), force="mesh")
+
+    # **Complete, so it gets its name.** Until this line the directory is named
+    # `_textured.part` and no caller would mistake it for a finished bake.
+    if final_dir.exists():
+        shutil.rmtree(final_dir)
+    os.replace(staging_dir, final_dir)
     return TextureResult(
-        mesh_path=output,
+        mesh_path=final_dir / output.name,
         load_sec=_LOAD_SEC,
         texture_sec=texture_sec,
         n_faces=int(len(baked.faces)),

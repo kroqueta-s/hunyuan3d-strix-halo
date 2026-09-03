@@ -84,6 +84,9 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
     return {
         "name": NAME,
         "version": VERSION,
+        # The version of `docs/runner_contract.md` this was written against.
+        # **A caller uses it to explain an absence**, never to refuse a runner.
+        "contract": 3,
         "capabilities": {
             "image_to_mesh": True,
             # There is no direct text-to-3D path; the image comes from elsewhere.
@@ -94,6 +97,16 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "texture": True,
             # Texture an existing mesh from a reference image.
             "texture_mesh": True,
+        },
+        # **Every method that is not `image_to_mesh` declares its own settings**
+        # (contract §3). Without this a caller has to guess, and the guess it
+        # made was "the same as the shape stage" - which this runner then threw
+        # away without a word.
+        "method_params": {
+            "texture_mesh": {
+                "rembg": {"type": "bool", "default": True},
+                "save_glb": {"type": "bool", "default": False},
+            },
         },
         "params": {
             "steps": {"type": "int", "default": 30, "min": 1, "max": 200},
@@ -108,7 +121,9 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "is unavailable, and enable_flashvdm is required. rembg cannot be skipped "
             "(ImageProcessorV2.recenter does nothing useful on a 3-channel image). "
             "Generation time varies between 235 and 921 seconds for identical settings, "
-            "so never use it as a pass/fail signal."
+            "so never use it as a pass/fail signal. "
+            "The output axes are unmeasured, so up_axis and forward_axis are reported "
+            "as null rather than guessed."
         ),
     }
 
@@ -144,6 +159,13 @@ _ALLOWED = frozenset(
     {"steps", "octree_resolution", "guidance_scale", "seed", "rembg", "rembg_model", "texture"}
 )
 
+# **What `texture_mesh` takes, which is not what `image_to_mesh` takes.** It is a
+# separate method on a mesh from anywhere, so a shape model's `steps` and
+# `octree_resolution` mean nothing to it. They used to be accepted and silently
+# dropped, which is worse than refusing them: a caller could change a setting,
+# see no error, and get the same result.
+_ALLOWED_TEXTURE = frozenset({"rembg", "save_glb"})
+
 
 def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
     """Texture an existing mesh from a reference image.
@@ -155,6 +177,16 @@ def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
     unwrapping UVs, so a dense input comes back much lighter. `n_faces` in the
     result says what came out; keep the original if you need the detail.
     """
+    # **Refuse what this method never declared** (contract §4). A shape setting
+    # sent here used to be accepted and dropped without a word, so a caller could
+    # change `steps`, see no error, and get an identical bake.
+    unknown = set(params) - _ALLOWED_TEXTURE - {"mesh_path", "image_path", "out_dir"}
+    if unknown:
+        raise ValueError(
+            f"unknown parameters: {sorted(unknown)} "
+            f"(texture_mesh accepts: {sorted(_ALLOWED_TEXTURE)})"
+        )
+
     from . import background, shape, texture
 
     # **The shape stage is not needed here.** hearth loads a runner before
@@ -196,6 +228,14 @@ def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         "source_mesh": str(params["mesh_path"]),
         "input_image": str(image_path),
         "n_faces": result.n_faces,
+        # **The geometry is rewritten here**, so the mesh that comes back is not
+        # the one that went in and its axes are upstream's, unmeasured as above.
+        "up_axis": None,
+        "forward_axis": None,
+        "params_used": {
+            "rembg": bool(params.get("rembg", True)),
+            "save_glb": bool(params.get("save_glb", False)),
+        },
         "metrics": {
             "load_sec": round(result.load_sec, 2),
             "texture_sec": round(result.texture_sec, 2),
@@ -244,7 +284,12 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
 
     progress("export", "writing the mesh")
     mesh_path = out_dir / "raw.ply"
-    result.mesh.export(str(mesh_path))
+    # **Written beside its final name, then renamed** (contract §9). A cancel
+    # ends this process outright, and a run killed halfway through writing a
+    # million faces otherwise leaves a truncated file that looks finished.
+    staging = out_dir / "raw.ply.part"
+    result.mesh.export(str(staging), file_type="ply")
+    os.replace(staging, mesh_path)
 
     # **The texture stage is opt-in**: it costs several more minutes and its own
     # weights, and downstream printing does not need it.
@@ -292,7 +337,15 @@ def m_image_to_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "blas_backend": shape.blas_backend(),
             **texture_metrics,
         },
-        "params": {
+        # **Not measured, so not claimed** (contract §5). Upstream normalizes
+        # the input and restores the scale afterwards, but which way is up has
+        # never been checked against a mesh made here - and a mesh imported on
+        # the wrong axis renders perfectly correctly, so nobody would find out by
+        # looking. `null` travels downstream and the caller says "assumed,
+        # unverified" instead of saying nothing.
+        "up_axis": None,
+        "forward_axis": None,
+        "params_used": {
             "steps": result.steps,
             "octree_resolution": result.octree_resolution,
             "guidance_scale": result.guidance_scale,

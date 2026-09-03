@@ -139,6 +139,7 @@ Two stand-ins replace compiled extensions, so both are pinned by tests:
 ```powershell
 .venv\Scripts\python.exe tests\test_raster.py    # the z-buffer rasterizer (needs torch)
 .venv\Scripts\python.exe tests\test_inpaint.py   # the UV hole-filler (numpy only)
+.venv\Scripts\python.exe tests\test_result_shape.py  # what it reports (no GPU, no weights)
 ```
 
 CI runs the second one; the first needs a GPU and runs here.
@@ -195,9 +196,23 @@ three runners in this family.
 
 ## Limits
 
+- **Which way is up has never been measured here**, so the result reports
+  `up_axis: null` rather than a guess. A mesh imported on the wrong axis renders
+  perfectly correctly, so the mistake is not one anybody finds by looking: the
+  first sign is a mirrored joint on a printed part. A caller should say the
+  orientation is assumed rather than known. Measuring it and reporting `"z"`
+  is a small job that nobody has done.
 - **The texture stage rewrites the geometry.** Upstream decimates to 40,000
   faces before unwrapping UVs, and that is upstream's design, not a setting.
   Keep `raw.ply` when the detail matters.
+- **The textured result is a directory, not a file.** `textured.obj` names its
+  material file, which names its images, so the three only mean anything
+  together. They are written into `_textured.part/` and the directory is renamed
+  to `textured/` once the bake is complete - a run that dies partway leaves
+  nothing that looks finished.
+- **`texture_mesh` takes its own settings**, listed under `method_params` in
+  `capabilities`. Sending it the shape stage's settings is now an error rather
+  than something quietly ignored.
 - **No GLB.** Upstream's converter imports `bpy` (Blender, GPL), which would
   cost this repository its MIT licence, so a stand-in is installed that imports
   cleanly and raises if called. The texture is written as `.obj` plus images.
