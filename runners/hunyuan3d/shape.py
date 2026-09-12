@@ -261,12 +261,22 @@ class ShapeResult:
     seed: int
 
 
-def load_pipeline() -> Any:
+def load_pipeline(progress: Callable[[str, str], None] | None = None) -> Any:
     """Load the Hunyuan3D 2.1 shape pipeline once per process and return it.
 
     The order of the steps matters. In particular, `_install_sdpa_shim` must be
     called **before hy3dshape is imported**: once the import binds
     `scaled_dot_product_attention`, the replacement no longer takes effect.
+
+    **The heartbeat runs through the load.** `from_pretrained` takes about
+    80 seconds here and says nothing while it does, which a caller watching for
+    liveness reads as a stall: hearth's own harness ends a runner that has been
+    silent for sixty, and the five-model switch test failed on exactly that
+    (2026-09-12). The watcher this uses is the one generation already uses.
+
+    Args:
+        progress: Where to report liveness. Loading emits no steps - there is
+            nothing countable to count - so this is heartbeats only (contract §8).
 
     Returns:
         A Hunyuan3DDiTFlowMatchingPipeline instance.
@@ -302,9 +312,15 @@ def load_pipeline() -> Any:
     from hy3dshape.pipelines import Hunyuan3DDiTFlowMatchingPipeline
 
     t0 = time.perf_counter()
-    pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
-        config.SHAPE_MODEL_ID, device="cuda", dtype=torch.float16
-    )
+    with _DeviceWatch(
+        progress=progress,
+        stage="loading the weights",
+        heartbeat_sec=config.HEARTBEAT_SEC,
+        limit_gb=config.VRAM_LIMIT_GB,
+    ):
+        pipe = Hunyuan3DDiTFlowMatchingPipeline.from_pretrained(
+            config.SHAPE_MODEL_ID, device="cuda", dtype=torch.float16
+        )
     # flashvdm is required: the default VanillaVolumeDecoder queries every point
     # of a 385^3 grid and does not finish in 30 minutes. FlashVDM is pure PyTorch
     # and uses no custom CUDA kernels. mc_algo="mc" is skimage on the CPU; "dmc"
@@ -350,7 +366,7 @@ def generate_mesh(
     octree_resolution = config.MC_RESOLUTION if octree_resolution is None else octree_resolution
     guidance_scale = config.GUIDANCE_SCALE if guidance_scale is None else guidance_scale
 
-    pipe = load_pipeline()
+    pipe = load_pipeline(progress)
     load_sec = _LOAD_SEC
 
     # **Report the denoising steps.** The scheduler is the authority on how many

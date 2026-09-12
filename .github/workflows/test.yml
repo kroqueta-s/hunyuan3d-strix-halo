@@ -27,3 +27,7 @@ jobs:
       # installed - which is the point: a result key that quietly changes name
       # is not an error anywhere downstream, it just loses the settings.
       - run: python tests/test_result_shape.py
+      # **Loading has to report liveness.** Eighty silent seconds is a stall to
+      # anything watching, and hearth's harness ends a runner on sixty. torch is
+      # replaced by a stand-in, so this needs no GPU and no weights.
+      - run: python tests/test_load_heartbeat.py

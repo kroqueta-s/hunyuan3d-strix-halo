@@ -141,7 +141,9 @@ def m_load(params: dict[str, Any], progress: Any) -> dict[str, Any]:
 
     progress("load", "loading the Hunyuan3D weights (about 80 seconds on the first run)")
     started = time.perf_counter()
-    shape.load_pipeline()
+    # **The heartbeat has to reach the caller through the load**, not only
+    # after it: eighty silent seconds is a stall to anything watching.
+    shape.load_pipeline(progress)
     return {"loaded": True, "elapsed_sec": round(time.perf_counter() - started, 2)}
 
 
