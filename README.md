@@ -193,6 +193,12 @@ three runners in this family.
   machine, with the GPU busy the whole time. Do not kill it; every later run
   reuses the tuned kernels. The runner emits a `heartbeat` line every 10 s —
   as long as those keep coming, it is working.
+- **Loading the weights beats too.** It takes about 80 seconds and used to say
+  nothing for all of it, which a caller cannot tell from a hang: hearth's own
+  harness ends a runner that has been silent for 60 s, and a five-model switch
+  test failed on exactly that. The heartbeat now runs through both loads, the
+  shape stage's and the texture stage's. It carries no step count, because
+  loading has nothing countable to count.
 
 ## Limits
 

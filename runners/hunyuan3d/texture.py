@@ -337,6 +337,8 @@ def load_pipeline(progress: Callable[[str, str], None] | None = None) -> Any:
         say("texture_load", "loading the texture weights (tens of seconds on the first run)")
         from hy3dpaint.textureGenPipeline import Hunyuan3DPaintConfig, Hunyuan3DPaintPipeline
 
+        from .shape import _DeviceWatch
+
         cfg = Hunyuan3DPaintConfig(
             max_num_view=config.TEXTURE_MAX_VIEWS,
             resolution=config.TEXTURE_VIEW_RESOLUTION,
@@ -348,7 +350,16 @@ def load_pipeline(progress: Callable[[str, str], None] | None = None) -> Any:
         # `AutoModel.from_pretrained`.
         if config.TEXTURE_DINO_DIR.is_dir():
             cfg.dino_ckpt_path = str(config.TEXTURE_DINO_DIR)
-        _PIPELINE = Hunyuan3DPaintPipeline(cfg)
+        # **The same gap as the shape load.** Constructing this takes tens of
+        # seconds and says nothing, which a caller watching for liveness reads
+        # as a stall.
+        with _DeviceWatch(
+            progress=progress,
+            stage="loading the texture weights",
+            heartbeat_sec=config.HEARTBEAT_SEC,
+            limit_gb=config.VRAM_LIMIT_GB,
+        ):
+            _PIPELINE = Hunyuan3DPaintPipeline(cfg)
     _LOAD_SEC = time.perf_counter() - started
     say("texture_loaded", f"weights loaded ({_LOAD_SEC:.1f}s)")
     return _PIPELINE
