@@ -122,6 +122,14 @@ def m_capabilities(params: dict[str, Any], progress: Any) -> dict[str, Any]:
             "rembg_model": {"type": "str", "default": ""},
             "texture": {"type": "bool", "default": False},
         },
+        # **What this runner needs of the card at its defaults, weights included**
+        # (contract §3), so hearth refuses a generation while other processes
+        # hold the room rather than starting a load the driver may abort.
+        # Measured 2026-09-15 from outside through hearth, the runner's process
+        # family sampled every 0.5 s: image_to_mesh peaked at 16.71 GB (steps 30,
+        # octree_resolution 384, sample image) and texture_mesh at 18.62 GB (a
+        # 395,712-face mesh). Both rounded up by about 6% for what a sample misses.
+        "vram_peak_gb": {"image_to_mesh": 17.8, "texture_mesh": 19.8},
         "notes": (
             "On gfx1151, SDPA falls back to fp32 over 4 chunked heads when fast attention "
             "is unavailable, and enable_flashvdm is required. rembg cannot be skipped "
@@ -232,8 +240,21 @@ def m_texture_mesh(params: dict[str, Any], progress: Any) -> dict[str, Any]:
         save_glb=bool(params.get("save_glb", False)),
         progress=progress,
     )
+
+    # **`mesh_path` is a PLY** (contract §5): upstream's `.obj` set becomes the
+    # geometry with the texture sampled onto its vertices, and a GLB carrying the
+    # texture itself goes in `extra` (protocol §3.1a). Written by trimesh, not by
+    # upstream's `bpy` conversion.
+    from .export import export_textured
+
+    progress("export", "writing the painted mesh as PLY and GLB")
+    exported = export_textured(result.mesh_path, result.mesh_path.parent)
     return {
-        "mesh_path": str(result.mesh_path),
+        "mesh_path": str(exported.ply),
+        "extra": {
+            "textured_glb": str(exported.glb),
+            "textured_obj": str(result.mesh_path),
+        },
         "source_mesh": str(params["mesh_path"]),
         "input_image": str(image_path),
         "n_faces": result.n_faces,
